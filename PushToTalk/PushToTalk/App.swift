@@ -28,19 +28,62 @@ enum DictationPhase {
 
 /// App-wide state. @Observable (macOS 14's Observation framework) makes any
 /// SwiftUI view that *reads* a property re-render when that property changes —
-/// no subscription boilerplate. Stage 2+ components (hotkey, recorder,
-/// transcriber) will write to this; views only read it.
+/// no subscription boilerplate. Pipeline components write to this; views
+/// only read it.
 @Observable
 final class AppState {
+    /// Singleton because SwiftUI may re-evaluate the App struct's property
+    /// initializers; the event tap must only ever be wired up against one
+    /// long-lived instance.
+    static let shared = AppState()
+
     var phase: DictationPhase = .idle
+    /// False when the event tap couldn't start (Input Monitoring not yet
+    /// granted) — drives the warning section in the menu.
+    var hotkeyReady = false
+
+    // Not UI state, so exempt them from observation tracking.
+    @ObservationIgnored private let hotkey = HotkeyManager()
+    @ObservationIgnored private var overlay: OverlayPanel?
+
+    func start() {
+        hotkey.onPress = { [weak self] in self?.beginDictation() }
+        hotkey.onRelease = { [weak self] in self?.endDictation() }
+        hotkeyReady = hotkey.start()
+    }
+
+    func retryHotkey() {
+        hotkeyReady = hotkey.start()
+    }
+
+    func openInputMonitoringSettings() {
+        let pane = "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+        NSWorkspace.shared.open(URL(string: pane)!)
+    }
+
+    private func beginDictation() {
+        phase = .recording
+        // Created lazily so no window work happens during app startup.
+        if overlay == nil { overlay = OverlayPanel() }
+        overlay?.show()
+    }
+
+    private func endDictation() {
+        // Stage 4 will insert .processing between these two.
+        phase = .idle
+        overlay?.hide()
+    }
 }
 
 @main
 struct PushToTalkApp: App {
-    /// @State on the App struct keeps this single instance alive for the
-    /// whole app lifetime (the App struct itself is a value type that SwiftUI
-    /// recreates freely; @State storage survives those recreations).
-    @State private var appState = AppState()
+    @State private var appState = AppState.shared
+
+    init() {
+        // App.init is the earliest launch hook a pure-SwiftUI app has
+        // (no AppDelegate). Idempotent: start() no-ops if already running.
+        AppState.shared.start()
+    }
 
     var body: some Scene {
         // MenuBarExtra is the whole UI — no WindowGroup, and LSUIElement=YES
@@ -48,15 +91,14 @@ struct PushToTalkApp: App {
         MenuBarExtra {
             Text(appState.phase.label)
 
-            Divider()
-
-            // Stage 1 only: lets us see the icon react before any real
-            // pipeline exists. Remove in Stage 2 when the hotkey drives phase.
-            Button("Cycle State (Stage 1 debug)") {
-                switch appState.phase {
-                case .idle: appState.phase = .recording
-                case .recording: appState.phase = .processing
-                case .processing: appState.phase = .idle
+            if !appState.hotkeyReady {
+                Divider()
+                Text("⚠️ Needs Input Monitoring permission")
+                Button("Open Privacy Settings…") {
+                    appState.openInputMonitoringSettings()
+                }
+                Button("Retry") {
+                    appState.retryHotkey()
                 }
             }
 
