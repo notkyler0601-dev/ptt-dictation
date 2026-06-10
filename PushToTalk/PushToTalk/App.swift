@@ -54,6 +54,16 @@ enum ModelStatus {
     }
 }
 
+/// One finished dictation, for the menu's history list. In-memory only —
+/// transcripts are never written to disk (the app's whole premise is that
+/// nothing leaves the machine, or even outlives the process).
+struct DictationRecord: Identifiable {
+    let id = UUID()
+    let text: String
+    let date: Date
+    let duration: TimeInterval
+}
+
 /// App-wide state. @Observable (macOS 14's Observation framework) makes any
 /// SwiftUI view that *reads* a property re-render when that property changes —
 /// no subscription boilerplate. Pipeline components write to this; views
@@ -76,6 +86,11 @@ final class AppState {
     var cleanupStatus: ModelStatus = .loading
     /// False until Accessibility is granted (needed to post the Cmd+V).
     var pasteReady = false
+    /// Newest first, capped at 20, in-memory only.
+    var history: [DictationRecord] = []
+    /// Mirror of the active hotkey's display name (the manager itself is
+    /// @ObservationIgnored, so views can't observe it directly).
+    var hotkeyLabel = HotkeyChoice.rightOption.label
 
     private static let restingLevels = [CGFloat](repeating: 0, count: 12)
     /// Port of the prototype's MIN_RECORD_SECONDS: near-empty audio makes
@@ -103,6 +118,7 @@ final class AppState {
         if let raw = UserDefaults.standard.string(forKey: Prefs.hotkey),
            let choice = HotkeyChoice(rawValue: raw) {
             hotkey.hotkey = choice
+            hotkeyLabel = choice.label
         }
         hotkey.onPress = { [weak self] in self?.beginDictation() }
         hotkey.onRelease = { [weak self] in self?.endDictation() }
@@ -151,6 +167,7 @@ final class AppState {
 
     func setHotkey(_ choice: HotkeyChoice) {
         hotkey.hotkey = choice
+        hotkeyLabel = choice.label
         UserDefaults.standard.set(choice.rawValue, forKey: Prefs.hotkey)
     }
 
@@ -247,6 +264,13 @@ final class AppState {
                     }
                 }
 
+                // Record before pasting so the transcript is recoverable
+                // from the menu even if the paste itself can't run.
+                let duration = Double(samples.count) / AudioRecorder.sampleRate
+                history.insert(
+                    DictationRecord(text: text, date: Date(), duration: duration), at: 0)
+                if history.count > 20 { history.removeLast(history.count - 20) }
+
                 if !paster.hasPermission {
                     print("  (paste skipped: Accessibility not granted)")
                     pasteReady = false
@@ -292,65 +316,17 @@ struct PushToTalkApp: App {
     var body: some Scene {
         // MenuBarExtra is the whole UI — no WindowGroup, and LSUIElement=YES
         // in the target settings keeps the app out of the Dock and Cmd+Tab.
+        // .window style turns the dropdown into a real SwiftUI panel
+        // (MenuView) instead of a text-only menu.
         MenuBarExtra {
-            Text(appState.phase.label)
-            Text("Whisper: \(appState.whisperStatus.text)")
-            Text("Cleanup: \(appState.cleanupStatus.text)")
-
-            if !appState.hotkeyReady {
-                Divider()
-                Text("⚠️ Needs Input Monitoring permission")
-                Button("Open Privacy Settings…") {
-                    appState.openInputMonitoringSettings()
-                }
-                Button("Retry") {
-                    appState.retryHotkey()
-                }
-            }
-
-            if !appState.pasteReady {
-                Divider()
-                Text("⚠️ Needs Accessibility permission (to paste)")
-                Button("Open Accessibility Settings…") {
-                    appState.openAccessibilitySettings()
-                }
-                Button("Retry") {
-                    appState.retryPaste()
-                }
-            }
-
-            Divider()
-
-            SettingsMenuButton()
-
-            // LSUIElement apps have no Dock icon or app menu, so without this
-            // button the only way to quit would be Activity Monitor.
-            Button("Quit PushToTalk") {
-                NSApplication.shared.terminate(nil)
-            }
-            .keyboardShortcut("q")
+            MenuView(state: appState)
         } label: {
             Image(systemName: appState.phase.symbolName)
         }
+        .menuBarExtraStyle(.window)
 
         Settings {
             SettingsView()
         }
-    }
-}
-
-/// Tiny wrapper because @Environment lives on Views, not Apps. The
-/// activate() call matters: an LSUIElement app isn't frontmost when its
-/// menu is used, so without it the Settings window opens behind whatever
-/// app the user is in.
-private struct SettingsMenuButton: View {
-    @Environment(\.openSettings) private var openSettings
-
-    var body: some View {
-        Button("Settings…") {
-            openSettings()
-            NSApp.activate(ignoringOtherApps: true)
-        }
-        .keyboardShortcut(",")
     }
 }
