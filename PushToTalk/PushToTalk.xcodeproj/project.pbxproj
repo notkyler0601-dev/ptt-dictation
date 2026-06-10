@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		7AC0FFEE2FD9000000000003 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = 7AC0FFEE2FD9000000000002 /* WhisperKit */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		28D531BB2FD9E7E300EAF4F1 /* PushToTalk.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PushToTalk.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -36,6 +40,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				7AC0FFEE2FD9000000000003 /* WhisperKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -78,6 +83,7 @@
 			);
 			name = PushToTalk;
 			packageProductDependencies = (
+				7AC0FFEE2FD9000000000002 /* WhisperKit */,
 			);
 			productName = PushToTalk;
 			productReference = 28D531BB2FD9E7E300EAF4F1 /* PushToTalk.app */;
@@ -107,6 +113,9 @@
 			);
 			mainGroup = 28D531B22FD9E7E300EAF4F1;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				7AC0FFEE2FD9000000000001 /* XCRemoteSwiftPackageReference "WhisperKit" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 28D531BC2FD9E7E300EAF4F1 /* Products */;
 			projectDirPath = "";
@@ -342,6 +351,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		7AC0FFEE2FD9000000000001 /* XCRemoteSwiftPackageReference "WhisperKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/argmaxinc/WhisperKit.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		7AC0FFEE2FD9000000000002 /* WhisperKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 7AC0FFEE2FD9000000000001 /* XCRemoteSwiftPackageReference "WhisperKit" */;
+			productName = WhisperKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 28D531B32FD9E7E300EAF4F1 /* Project object */;
 }
