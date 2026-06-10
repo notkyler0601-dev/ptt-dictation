@@ -35,7 +35,7 @@ code comments), not just the diff. Prefer plan-then-execute for each stage.
 | Hotkey         | `CGEventTap` listening for `flagsChanged` (default hotkey: **right Option**, keycode 61) |
 | Audio          | `AVAudioEngine` input tap; convert to 16 kHz mono Float32     |
 | ASR            | WhisperKit (`github.com/argmaxinc/WhisperKit`), model `large-v3-turbo` from `argmaxinc/whisperkit-coreml` |
-| Cleanup LLM    | `MLXLLM` (from `github.com/ml-explore/mlx-swift-examples`), model `mlx-community/Qwen3-4B-Instruct-2507-4bit` |
+| Cleanup LLM    | `MLXLLM` (from `github.com/ml-explore/mlx-swift-lm` — the LLM libraries moved out of `mlx-swift-examples` upstream), model `mlx-community/Qwen3-4B-Instruct-2507-4bit` |
 | Paste          | `NSPasteboard` swap + synthetic Cmd+V via `CGEvent` (keycode 9, `.maskCommand`) |
 | Launch at login| `SMAppService.mainApp` toggle in Settings                     |
 | Target         | macOS 14.0+, Apple Silicon only                               |

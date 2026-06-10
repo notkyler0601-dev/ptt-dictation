@@ -33,11 +33,11 @@ enum ModelStatus {
     case ready
     case failed(String)
 
-    var label: String {
+    var text: String {
         switch self {
-        case .loading: "Whisper: loading…"
-        case .ready: "Whisper: ready"
-        case .failed(let reason): "Whisper failed: \(reason)"
+        case .loading: "loading…"
+        case .ready: "ready"
+        case .failed(let reason): "failed: \(reason)"
         }
     }
 }
@@ -61,8 +61,11 @@ final class AppState {
     /// at the end. Fixed length so the bars never jump in count.
     var hudLevels: [CGFloat] = AppState.restingLevels
     var whisperStatus: ModelStatus = .loading
+    var cleanupStatus: ModelStatus = .loading
     /// False until Accessibility is granted (needed to post the Cmd+V).
     var pasteReady = false
+    /// Config default; becomes a real setting in Stage 7.
+    var cleanupEnabled = true
 
     private static let restingLevels = [CGFloat](repeating: 0, count: 12)
     /// Port of the prototype's MIN_RECORD_SECONDS: near-empty audio makes
@@ -73,6 +76,7 @@ final class AppState {
     @ObservationIgnored private let hotkey = HotkeyManager()
     @ObservationIgnored private let recorder = AudioRecorder()
     @ObservationIgnored private let transcriber = Transcriber()
+    @ObservationIgnored private let cleaner = Cleaner()
     @ObservationIgnored private let paster = Paster()
     @ObservationIgnored private var overlay: OverlayPanel?
     /// Tail of the processing chain — the prototype's `_busy` lock, in Task
@@ -92,15 +96,22 @@ final class AppState {
         // Same for Accessibility (the synthetic Cmd+V needs it).
         pasteReady = paster.requestPermission()
 
-        // Warm-load Whisper now so the first dictation doesn't pay the
-        // model load (Gotcha 8). Dictations that finish before this does
-        // simply queue behind the load and transcribe once it's ready.
+        // Warm-load the models so the first dictation doesn't pay the load
+        // cost (Gotcha 8). Sequential like the prototype: Whisper first
+        // (the must-have), then the cleanup LLM. Dictations that finish
+        // before a load simply queue behind it.
         Task {
             do {
                 try await transcriber.warmLoad()
                 whisperStatus = .ready
             } catch {
                 whisperStatus = .failed(error.localizedDescription)
+            }
+            do {
+                try await cleaner.warmLoad()
+                cleanupStatus = .ready
+            } catch {
+                cleanupStatus = .failed(error.localizedDescription)
             }
         }
     }
@@ -162,14 +173,30 @@ final class AppState {
 
     private func process(_ samples: [Float]) async {
         do {
-            let started = Date()
-            let text = try await transcriber.transcribe(samples)
-            let elapsed = Date().timeIntervalSince(started)
+            var started = Date()
+            var text = try await transcriber.transcribe(samples)
+            let whisperTime = Date().timeIntervalSince(started)
             if text.isEmpty {
                 // Whisper on borderline audio: skip rather than paste junk.
                 print("  (empty transcript)")
             } else {
-                print(String(format: "  whisper [%.2fs]: \"%@\"", elapsed, text))
+                print(String(format: "  whisper [%.2fs]: \"%@\"", whisperTime, text))
+
+                // Short utterances paste raw — keeps them instant
+                // (prototype: CLEANUP_MIN_WORDS).
+                let words = text.split(whereSeparator: \.isWhitespace).count
+                if cleanupEnabled && words >= Cleaner.minWords {
+                    started = Date()
+                    do {
+                        text = try await cleaner.cleanup(text)
+                        print(String(format: "  cleanup [%.2fs]: \"%@\"",
+                                     Date().timeIntervalSince(started), text))
+                    } catch {
+                        // Cleanup is best-effort; the transcript still lands.
+                        print("  cleanup failed (pasting raw): \(error)")
+                    }
+                }
+
                 if !paster.hasPermission {
                     print("  (paste skipped: Accessibility not granted)")
                     pasteReady = false
@@ -207,7 +234,8 @@ struct PushToTalkApp: App {
         // in the target settings keeps the app out of the Dock and Cmd+Tab.
         MenuBarExtra {
             Text(appState.phase.label)
-            Text(appState.whisperStatus.label)
+            Text("Whisper: \(appState.whisperStatus.text)")
+            Text("Cleanup: \(appState.cleanupStatus.text)")
 
             if !appState.hotkeyReady {
                 Divider()
