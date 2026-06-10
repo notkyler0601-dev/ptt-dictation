@@ -61,6 +61,8 @@ final class AppState {
     /// at the end. Fixed length so the bars never jump in count.
     var hudLevels: [CGFloat] = AppState.restingLevels
     var whisperStatus: ModelStatus = .loading
+    /// False until Accessibility is granted (needed to post the Cmd+V).
+    var pasteReady = false
 
     private static let restingLevels = [CGFloat](repeating: 0, count: 12)
     /// Port of the prototype's MIN_RECORD_SECONDS: near-empty audio makes
@@ -71,6 +73,7 @@ final class AppState {
     @ObservationIgnored private let hotkey = HotkeyManager()
     @ObservationIgnored private let recorder = AudioRecorder()
     @ObservationIgnored private let transcriber = Transcriber()
+    @ObservationIgnored private let paster = Paster()
     @ObservationIgnored private var overlay: OverlayPanel?
     /// Tail of the processing chain — the prototype's `_busy` lock, in Task
     /// form. Each dictation awaits the previous one, so rapid-fire
@@ -85,6 +88,9 @@ final class AppState {
         recorder.onLevel = { [weak self] level in self?.pushLevel(CGFloat(level)) }
         // Settle the mic permission dialog at launch, not mid-dictation.
         recorder.requestPermission()
+
+        // Same for Accessibility (the synthetic Cmd+V needs it).
+        pasteReady = paster.requestPermission()
 
         // Warm-load Whisper now so the first dictation doesn't pay the
         // model load (Gotcha 8). Dictations that finish before this does
@@ -103,8 +109,17 @@ final class AppState {
         hotkeyReady = hotkey.start()
     }
 
+    func retryPaste() {
+        pasteReady = paster.hasPermission
+    }
+
     func openInputMonitoringSettings() {
         let pane = "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+        NSWorkspace.shared.open(URL(string: pane)!)
+    }
+
+    func openAccessibilitySettings() {
+        let pane = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
         NSWorkspace.shared.open(URL(string: pane)!)
     }
 
@@ -155,6 +170,12 @@ final class AppState {
                 print("  (empty transcript)")
             } else {
                 print(String(format: "  whisper [%.2fs]: \"%@\"", elapsed, text))
+                if !paster.hasPermission {
+                    print("  (paste skipped: Accessibility not granted)")
+                    pasteReady = false
+                } else {
+                    await paster.paste(text)
+                }
             }
         } catch {
             print("  transcription failed: \(error)")
@@ -196,6 +217,17 @@ struct PushToTalkApp: App {
                 }
                 Button("Retry") {
                     appState.retryHotkey()
+                }
+            }
+
+            if !appState.pasteReady {
+                Divider()
+                Text("⚠️ Needs Accessibility permission (to paste)")
+                Button("Open Accessibility Settings…") {
+                    appState.openAccessibilitySettings()
+                }
+                Button("Retry") {
+                    appState.retryPaste()
                 }
             }
 
