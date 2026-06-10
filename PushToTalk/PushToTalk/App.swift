@@ -41,15 +41,25 @@ final class AppState {
     /// False when the event tap couldn't start (Input Monitoring not yet
     /// granted) — drives the warning section in the menu.
     var hotkeyReady = false
+    /// Rolling window of recent mic levels (0–1) for the HUD bars; newest
+    /// at the end. Fixed length so the bars never jump in count.
+    var hudLevels: [CGFloat] = AppState.restingLevels
+
+    private static let restingLevels = [CGFloat](repeating: 0, count: 12)
 
     // Not UI state, so exempt them from observation tracking.
     @ObservationIgnored private let hotkey = HotkeyManager()
+    @ObservationIgnored private let recorder = AudioRecorder()
     @ObservationIgnored private var overlay: OverlayPanel?
 
     func start() {
         hotkey.onPress = { [weak self] in self?.beginDictation() }
         hotkey.onRelease = { [weak self] in self?.endDictation() }
         hotkeyReady = hotkey.start()
+
+        recorder.onLevel = { [weak self] level in self?.pushLevel(CGFloat(level)) }
+        // Settle the mic permission dialog at launch, not mid-dictation.
+        recorder.requestPermission()
     }
 
     func retryHotkey() {
@@ -63,15 +73,37 @@ final class AppState {
 
     private func beginDictation() {
         phase = .recording
+        hudLevels = Self.restingLevels
+
+        do {
+            try recorder.start()
+        } catch {
+            // Most likely: mic permission missing, so there's no input
+            // format to record from. The HUD still shows; bars stay flat.
+            print("recorder failed to start: \(error)")
+        }
+
         // Created lazily so no window work happens during app startup.
-        if overlay == nil { overlay = OverlayPanel() }
+        if overlay == nil { overlay = OverlayPanel(state: self) }
         overlay?.show()
     }
 
     private func endDictation() {
-        // Stage 4 will insert .processing between these two.
+        let samples = recorder.stop()
+        let duration = Double(samples.count) / AudioRecorder.sampleRate
+        // Stage 3 acceptance: this should match the hold time. Stage 4
+        // replaces the log with the transcription pipeline (and the 0.3 s
+        // accidental-tap guard from the prototype).
+        print(String(format: "captured %.2f s of audio (%d samples)", duration, samples.count))
+
         phase = .idle
         overlay?.hide()
+    }
+
+    private func pushLevel(_ level: CGFloat) {
+        guard phase == .recording else { return }
+        hudLevels.removeFirst()
+        hudLevels.append(level)
     }
 }
 

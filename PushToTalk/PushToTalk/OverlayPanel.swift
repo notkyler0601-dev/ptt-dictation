@@ -11,7 +11,7 @@ import SwiftUI
 ///   - `canBecomeKey/Main = false` — even a stray click can't focus it,
 ///   - `orderFrontRegardless()` to show — displays without activation.
 final class OverlayPanel: NSPanel {
-    init() {
+    init(state: AppState) {
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 240, height: 72),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -27,7 +27,7 @@ final class OverlayPanel: NSPanel {
         isOpaque = false
         hasShadow = false  // the HUD view draws its own shadow
         ignoresMouseEvents = true  // display-only; clicks fall through
-        contentView = NSHostingView(rootView: RecordingHUD())
+        contentView = NSHostingView(rootView: RecordingHUD(state: state))
     }
 
     override var canBecomeKey: Bool { false }

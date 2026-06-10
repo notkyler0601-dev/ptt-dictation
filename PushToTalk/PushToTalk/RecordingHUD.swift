@@ -1,16 +1,13 @@
 import SwiftUI
 
-/// The pill shown while the hotkey is held: mic icon + level bars.
+/// The pill shown while the hotkey is held: mic icon + live level bars.
 ///
-/// Stage 2: the bars are fixed placeholder heights so the HUD has its final
-/// shape. Stage 3 feeds `levels` from the recorder's live RMS so they dance
-/// with the voice.
+/// AppState keeps a rolling window of recent mic levels; each tap buffer
+/// pushes a new value and drops the oldest, so the bars read as a waveform
+/// scrolling right-to-left. Because AppState is @Observable, this view
+/// re-renders on every push with no explicit subscription.
 struct RecordingHUD: View {
-    var levels: [CGFloat] = RecordingHUD.placeholderLevels
-
-    static let placeholderLevels: [CGFloat] = [
-        0.25, 0.55, 0.85, 0.45, 0.70, 0.35, 0.60, 0.90, 0.50, 0.30, 0.65, 0.40,
-    ]
+    var state: AppState
 
     var body: some View {
         HStack(spacing: 12) {
@@ -19,12 +16,15 @@ struct RecordingHUD: View {
                 .foregroundStyle(.red)
 
             HStack(spacing: 3) {
-                ForEach(levels.indices, id: \.self) { index in
+                ForEach(state.hudLevels.indices, id: \.self) { index in
                     Capsule()
-                        .frame(width: 4, height: 6 + 26 * levels[index])
+                        .frame(width: 4, height: 6 + 26 * state.hudLevels[index])
                 }
             }
             .foregroundStyle(.white.opacity(0.9))
+            // Animate height changes between pushes (~12/s), so bars glide
+            // instead of stepping.
+            .animation(.easeOut(duration: 0.08), value: state.hudLevels)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
@@ -39,6 +39,6 @@ struct RecordingHUD: View {
 }
 
 #Preview {
-    RecordingHUD()
+    RecordingHUD(state: AppState())
         .frame(width: 240, height: 72)
 }
