@@ -1,7 +1,17 @@
 import SwiftUI
 
-/// Where the dictation pipeline currently is. Later stages move this through
-/// idle → recording → processing → idle; the menu bar icon mirrors it.
+/// UserDefaults keys, shared between SettingsView (@AppStorage) and the
+/// pipeline (reads at dictation time).
+enum Prefs {
+    static let hotkey = "hotkey"
+    static let soundsEnabled = "soundsEnabled"
+    static let cleanupEnabled = "cleanupEnabled"
+    static let cleanupPrompt = "cleanupPrompt"
+}
+
+/// Where the dictation pipeline currently is. The pipeline moves this
+/// through idle → recording → processing → idle; the menu bar icon and the
+/// HUD both mirror it.
 enum DictationPhase {
     case idle
     case recording
@@ -19,7 +29,7 @@ enum DictationPhase {
 
     var label: String {
         switch self {
-        case .idle: "Idle — hold right Option to dictate"
+        case .idle: "Idle — hold the hotkey to dictate"
         case .recording: "Recording…"
         case .processing: "Transcribing…"
         }
@@ -30,12 +40,14 @@ enum DictationPhase {
 /// load once at launch, so the user needs to see "warming up" somewhere).
 enum ModelStatus {
     case loading
+    case downloading(percent: Int)
     case ready
     case failed(String)
 
     var text: String {
         switch self {
         case .loading: "loading…"
+        case .downloading(let percent): "downloading… \(percent)%"
         case .ready: "ready"
         case .failed(let reason): "failed: \(reason)"
         }
@@ -64,8 +76,6 @@ final class AppState {
     var cleanupStatus: ModelStatus = .loading
     /// False until Accessibility is granted (needed to post the Cmd+V).
     var pasteReady = false
-    /// Config default; becomes a real setting in Stage 7.
-    var cleanupEnabled = true
 
     private static let restingLevels = [CGFloat](repeating: 0, count: 12)
     /// Port of the prototype's MIN_RECORD_SECONDS: near-empty audio makes
@@ -85,6 +95,15 @@ final class AppState {
     @ObservationIgnored private var pipelineTask: Task<Void, Never>?
 
     func start() {
+        UserDefaults.standard.register(defaults: [
+            Prefs.soundsEnabled: true,
+            Prefs.cleanupEnabled: true,
+        ])
+
+        if let raw = UserDefaults.standard.string(forKey: Prefs.hotkey),
+           let choice = HotkeyChoice(rawValue: raw) {
+            hotkey.hotkey = choice
+        }
         hotkey.onPress = { [weak self] in self?.beginDictation() }
         hotkey.onRelease = { [weak self] in self?.endDictation() }
         hotkeyReady = hotkey.start()
@@ -102,13 +121,23 @@ final class AppState {
         // before a load simply queue behind it.
         Task {
             do {
-                try await transcriber.warmLoad()
+                try await transcriber.warmLoad { fraction in
+                    // Progress arrives on a background thread; hop to main
+                    // before touching observable state.
+                    Task { @MainActor in
+                        AppState.shared.setDownloadProgress(fraction, for: \.whisperStatus)
+                    }
+                }
                 whisperStatus = .ready
             } catch {
                 whisperStatus = .failed(error.localizedDescription)
             }
             do {
-                try await cleaner.warmLoad()
+                try await cleaner.warmLoad { fraction in
+                    Task { @MainActor in
+                        AppState.shared.setDownloadProgress(fraction, for: \.cleanupStatus)
+                    }
+                }
                 cleanupStatus = .ready
             } catch {
                 cleanupStatus = .failed(error.localizedDescription)
@@ -118,6 +147,21 @@ final class AppState {
 
     func retryHotkey() {
         hotkeyReady = hotkey.start()
+    }
+
+    func setHotkey(_ choice: HotkeyChoice) {
+        hotkey.hotkey = choice
+        UserDefaults.standard.set(choice.rawValue, forKey: Prefs.hotkey)
+    }
+
+    /// Coalesce noisy Progress callbacks into whole-percent menu updates.
+    func setDownloadProgress(_ fraction: Double, for status: ReferenceWritableKeyPath<AppState, ModelStatus>) {
+        let percent = Int(fraction * 100)
+        if case .downloading(let current) = self[keyPath: status], current == percent { return }
+        // Don't regress a model that already finished (a late callback
+        // can land after .ready is set).
+        if case .ready = self[keyPath: status] { return }
+        self[keyPath: status] = .downloading(percent: percent)
     }
 
     func retryPaste() {
@@ -137,6 +181,7 @@ final class AppState {
     private func beginDictation() {
         phase = .recording
         hudLevels = Self.restingLevels
+        play("Tink")
 
         do {
             try recorder.start()
@@ -153,15 +198,17 @@ final class AppState {
 
     private func endDictation() {
         let samples = recorder.stop()
-        overlay?.hide()
 
         let duration = Double(samples.count) / AudioRecorder.sampleRate
         guard duration >= Self.minRecordSeconds else {
             print(String(format: "  (ignored %.2fs tap)", duration))
             phase = .idle
+            overlay?.hide()
             return
         }
 
+        // Keep the HUD up — it switches to its "Transcribing…" face via the
+        // phase change, and hides when the pipeline goes idle.
         phase = .processing
         pipelineTask = Task { [previous = pipelineTask] in
             // Serialization point: wait for the previous dictation's
@@ -185,10 +232,13 @@ final class AppState {
                 // Short utterances paste raw — keeps them instant
                 // (prototype: CLEANUP_MIN_WORDS).
                 let words = text.split(whereSeparator: \.isWhitespace).count
-                if cleanupEnabled && words >= Cleaner.minWords {
+                let defaults = UserDefaults.standard
+                if defaults.bool(forKey: Prefs.cleanupEnabled), words >= Cleaner.minWords {
                     started = Date()
                     do {
-                        text = try await cleaner.cleanup(text)
+                        let prompt = defaults.string(forKey: Prefs.cleanupPrompt)
+                            ?? Cleaner.systemPrompt
+                        text = try await cleaner.cleanup(text, prompt: prompt)
                         print(String(format: "  cleanup [%.2fs]: \"%@\"",
                                      Date().timeIntervalSince(started), text))
                     } catch {
@@ -202,20 +252,30 @@ final class AppState {
                     pasteReady = false
                 } else {
                     await paster.paste(text)
+                    play("Pop")
                 }
             }
         } catch {
             print("  transcription failed: \(error)")
         }
-        // Don't clobber the phase if the user is already holding the key
-        // for the next dictation.
-        if phase == .processing { phase = .idle }
+        // Don't clobber the phase (or the HUD) if the user is already
+        // holding the key for the next dictation.
+        if phase == .processing {
+            phase = .idle
+            overlay?.hide()
+        }
     }
 
     private func pushLevel(_ level: CGFloat) {
         guard phase == .recording else { return }
         hudLevels.removeFirst()
         hudLevels.append(level)
+    }
+
+    /// System sound feedback (prototype: Tink on start, Pop on paste).
+    private func play(_ name: String) {
+        guard UserDefaults.standard.bool(forKey: Prefs.soundsEnabled) else { return }
+        NSSound(named: name)?.play()
     }
 }
 
@@ -261,6 +321,8 @@ struct PushToTalkApp: App {
 
             Divider()
 
+            SettingsMenuButton()
+
             // LSUIElement apps have no Dock icon or app menu, so without this
             // button the only way to quit would be Activity Monitor.
             Button("Quit PushToTalk") {
@@ -270,5 +332,25 @@ struct PushToTalkApp: App {
         } label: {
             Image(systemName: appState.phase.symbolName)
         }
+
+        Settings {
+            SettingsView()
+        }
+    }
+}
+
+/// Tiny wrapper because @Environment lives on Views, not Apps. The
+/// activate() call matters: an LSUIElement app isn't frontmost when its
+/// menu is used, so without it the Settings window opens behind whatever
+/// app the user is in.
+private struct SettingsMenuButton: View {
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        Button("Settings…") {
+            openSettings()
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        .keyboardShortcut(",")
     }
 }

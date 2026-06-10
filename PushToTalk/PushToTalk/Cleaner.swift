@@ -39,13 +39,15 @@ actor Cleaner {
 
     /// First run downloads ~2.3 GB from Hugging Face; later launches load
     /// from cache in a few seconds.
-    func warmLoad() async throws {
-        try await ensureLoaded()
+    /// `progress` reports download fraction (0–1), from a background thread.
+    func warmLoad(progress: @escaping @Sendable (Double) -> Void = { _ in }) async throws {
+        try await ensureLoaded(progress: progress)
     }
 
     /// Returns the cleaned transcript — or the raw one whenever the model
-    /// goes rogue (the prototype's sanity rails).
-    func cleanup(_ text: String) async throws -> String {
+    /// goes rogue (the prototype's sanity rails). The prompt is a parameter
+    /// so Settings can override it; callers default to `systemPrompt`.
+    func cleanup(_ text: String, prompt: String = Cleaner.systemPrompt) async throws -> String {
         try await ensureLoaded()
         guard let container else { throw CleanerError.notLoaded }
 
@@ -57,19 +59,20 @@ actor Cleaner {
         let output: String = try await container.perform { context in
             let input = try await context.processor.prepare(
                 input: UserInput(chat: [
-                    .system(Self.systemPrompt),
+                    .system(prompt),
                     .user("<raw>\(text)</raw>"),
                 ]))
             // Temperature 0: deterministic cleanup, no creative drift.
-            // (Explicit closure signature: generate() has several overloads
-            // differing only in callback type, so `{ _ in .more }` is
-            // ambiguous to the compiler.)
-            let result = try MLXLMCommon.generate(
+            // maxTokens in the parameters makes generation self-limiting.
+            let stream = try MLXLMCommon.generate(
                 input: input,
                 parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0),
-                context: context
-            ) { (_: [Int]) -> GenerateDisposition in .more }
-            return result.output
+                context: context)
+            var text = ""
+            for await item in stream {
+                if case .chunk(let chunk) = item { text += chunk }
+            }
+            return text
         }
 
         let cleaned = output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -83,12 +86,15 @@ actor Cleaner {
         return cleaned
     }
 
-    private func ensureLoaded() async throws {
+    private func ensureLoaded(
+        progress: @escaping @Sendable (Double) -> Void = { _ in }
+    ) async throws {
         if container != nil { return }
         if loading == nil {
             loading = Task {
                 self.container = try await LLMModelFactory.shared.loadContainer(
-                    configuration: ModelConfiguration(id: Self.modelID))
+                    configuration: ModelConfiguration(id: Self.modelID),
+                    progressHandler: { progress($0.fractionCompleted) })
             }
         }
         do {

@@ -1,31 +1,67 @@
 import AppKit
 import IOKit.hid
 
-/// System-wide listener for the push-to-talk key (right Option), built on a
-/// CGEventTap.
-///
-/// Right Option is ideal (same reasoning as the prototype): it never collides
-/// with app shortcuts, and modifier keys don't auto-repeat — the tap only sees
-/// `flagsChanged` transitions, so we get exactly one press and one release
-/// per hold.
+/// The push-to-talk key options offered in Settings. All modifier-style
+/// keys on purpose: they never collide with app shortcuts, and modifiers
+/// don't auto-repeat — the tap only sees `flagsChanged` transitions, so we
+/// get exactly one press and one release per hold (prototype rationale).
+enum HotkeyChoice: String, CaseIterable, Identifiable {
+    case rightOption
+    case rightCommand
+    case rightControl
+    case function
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .rightOption: "Right Option (⌥)"
+        case .rightCommand: "Right Command (⌘)"
+        case .rightControl: "Right Control (⌃)"
+        case .function: "Globe / Fn"
+        }
+    }
+
+    /// Virtual keycode seen in the flagsChanged event.
+    var keycode: Int64 {
+        switch self {
+        case .rightOption: 61   // kVK_RightOption
+        case .rightCommand: 54  // kVK_RightCommand
+        case .rightControl: 62  // kVK_RightControl
+        case .function: 63      // kVK_Function
+        }
+    }
+
+    /// Whether this key is physically down, from the event's flags.
+    ///
+    /// The public masks (.maskAlternate etc.) are set for *either* side of
+    /// a modifier pair, so they can't tell us which side changed (hold left
+    /// Option, release right → mask still set, and we'd think the hotkey is
+    /// still down). The raw flags word has device-specific side bits from
+    /// IOLLEvent.h — the same key identity the prototype got from pynput's
+    /// `alt_r`. Fn has no sides, so the public mask is fine there.
+    func isDown(_ flags: CGEventFlags) -> Bool {
+        switch self {
+        case .rightOption: flags.rawValue & 0x40 != 0    // NX_DEVICERALTKEYMASK
+        case .rightCommand: flags.rawValue & 0x10 != 0   // NX_DEVICERCMDKEYMASK
+        case .rightControl: flags.rawValue & 0x2000 != 0 // NX_DEVICERCTLKEYMASK
+        case .function: flags.contains(.maskSecondaryFn)
+        }
+    }
+}
+
+/// System-wide listener for the push-to-talk key, built on a CGEventTap.
 final class HotkeyManager {
     /// Called on the main thread when the hotkey goes down / comes up.
     var onPress: () -> Void = {}
     var onRelease: () -> Void = {}
 
+    /// Settable live from Settings; the tap itself doesn't change (it
+    /// always watches flagsChanged), only the matching logic does.
+    var hotkey: HotkeyChoice = .rightOption
+
     private var tap: CFMachPort?
     private var hotkeyDown = false
-
-    /// Right Option's virtual keycode (kVK_RightOption).
-    private static let rightOptionKeycode: Int64 = 61
-
-    /// `.maskAlternate` is set for *either* Option key, so it can't tell us
-    /// which side changed (hold left, release right → mask still set, and
-    /// we'd think the hotkey is still down). The raw flags word has
-    /// device-specific bits; 0x40 is NX_DEVICERALTKEYMASK (IOLLEvent.h),
-    /// set only while the *right* Option is physically down — same key
-    /// identity the prototype got from pynput's `alt_r`.
-    private static let rightOptionDeviceBit: UInt64 = 0x40
 
     /// Listen-only event taps are gated by the Input Monitoring TCC
     /// permission. Creating a tap without it just returns nil, so check
@@ -83,10 +119,10 @@ final class HotkeyManager {
         }
 
         guard type == .flagsChanged,
-              event.getIntegerValueField(.keyboardEventKeycode) == Self.rightOptionKeycode
+              event.getIntegerValueField(.keyboardEventKeycode) == hotkey.keycode
         else { return }
 
-        let down = event.flags.rawValue & Self.rightOptionDeviceBit != 0
+        let down = hotkey.isDown(event.flags)
         guard down != hotkeyDown else { return }
         hotkeyDown = down
 

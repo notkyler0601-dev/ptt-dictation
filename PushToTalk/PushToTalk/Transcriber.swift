@@ -33,8 +33,9 @@ actor Transcriber {
     /// Kick off (or join) the one-time model load. First run downloads
     /// ~1.5 GB from Hugging Face and compiles for the Neural Engine (can
     /// take a few minutes); later launches load from cache in seconds.
-    func warmLoad() async throws {
-        try await ensureLoaded()
+    /// `progress` reports download fraction (0–1), from a background thread.
+    func warmLoad(progress: @escaping @Sendable (Double) -> Void = { _ in }) async throws {
+        try await ensureLoaded(progress: progress)
     }
 
     func transcribe(_ samples: [Float]) async throws -> String {
@@ -46,16 +47,29 @@ actor Transcriber {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func ensureLoaded() async throws {
+    private func ensureLoaded(
+        progress: @escaping @Sendable (Double) -> Void = { _ in }
+    ) async throws {
         if pipe != nil { return }
         if loading == nil {
             // Task {} inside an actor inherits its isolation, so writing
             // self.pipe from the task body is actor-safe.
             loading = Task {
-                self.pipe = try await WhisperKit(WhisperKitConfig(
-                    model: Self.modelName,
-                    prewarm: true
-                ))
+                let config = WhisperKitConfig(model: Self.modelName, prewarm: true)
+                // Download explicitly first so we can surface progress;
+                // already-cached files are skipped, so this is cheap on
+                // later launches. If it fails (e.g. offline with a full
+                // cache), fall back to letting init resolve the model.
+                do {
+                    let folder = try await WhisperKit.download(
+                        variant: Self.modelName,
+                        progressCallback: { progress($0.fractionCompleted) }
+                    )
+                    config.modelFolder = folder.path
+                } catch {
+                    print("whisper download check failed (trying cache): \(error)")
+                }
+                self.pipe = try await WhisperKit(config)
             }
         }
         do {
