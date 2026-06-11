@@ -17,6 +17,10 @@ struct SettingsView: View {
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginItemError: String?
 
+    /// Voice command rules: edited here as local state, persisted to
+    /// UserDefaults on every change (the pipeline re-reads per dictation).
+    @State private var voiceCommands = VoiceCommandStore.load()
+
     var body: some View {
         Form {
             Section("General") {
@@ -69,6 +73,39 @@ struct SettingsView: View {
                     }
                     .disabled(cleanupPrompt == Cleaner.systemPrompt)
                 }
+            }
+
+            Section("Voice commands") {
+                Text("If a dictation matches a phrase exactly (case and punctuation are ignored), the text on the right is typed instead. Turn on ⏎ to also press Return — useful in a terminal, so \"cd downloads\" actually runs `cd ~/Downloads`.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                ForEach($voiceCommands) { $command in
+                    HStack(spacing: 8) {
+                        TextField("Say… (cd downloads)", text: $command.phrase)
+                        Image(systemName: "arrow.right")
+                            .foregroundStyle(.tertiary)
+                        TextField("Type… (cd ~/Downloads)", text: $command.replacement)
+                            .font(.system(.body, design: .monospaced))
+                        Toggle("⏎", isOn: $command.pressReturn)
+                            .toggleStyle(.checkbox)
+                            .help("Press Return after typing (runs the command)")
+                        Button {
+                            voiceCommands.removeAll { $0.id == command.id }
+                        } label: {
+                            Image(systemName: "minus.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+
+                Button("Add Command") {
+                    voiceCommands.append(VoiceCommand(phrase: "", replacement: ""))
+                }
+            }
+            .onChange(of: voiceCommands) { _, commands in
+                VoiceCommandStore.save(commands)
             }
 
             Section("Models (downloaded on first launch, then cached)") {

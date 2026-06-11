@@ -7,6 +7,7 @@ enum Prefs {
     static let soundsEnabled = "soundsEnabled"
     static let cleanupEnabled = "cleanupEnabled"
     static let cleanupPrompt = "cleanupPrompt"
+    static let voiceCommands = "voiceCommands"
 }
 
 /// Where the dictation pipeline currently is. The pipeline moves this
@@ -243,6 +244,25 @@ final class AppState {
             if text.isEmpty {
                 // Whisper on borderline audio: skip rather than paste junk.
                 print("  (empty transcript)")
+            } else if let command = VoiceCommandStore.match(text) {
+                // Voice command: paste the mapped text instead of the
+                // transcript; cleanup is skipped (it's a command, not prose).
+                print("  voice command: \"\(text)\" → \"\(command.replacement)\""
+                      + (command.pressReturn ? " ⏎" : ""))
+                let duration = Double(samples.count) / AudioRecorder.sampleRate
+                history.insert(
+                    DictationRecord(text: command.replacement, date: Date(), duration: duration),
+                    at: 0)
+                if history.count > 20 { history.removeLast(history.count - 20) }
+
+                if !paster.hasPermission {
+                    print("  (paste skipped: Accessibility not granted)")
+                    pasteReady = false
+                } else {
+                    await paster.paste(command.replacement)
+                    if command.pressReturn { paster.pressReturn() }
+                    play("Pop")
+                }
             } else {
                 print(String(format: "  whisper [%.2fs]: \"%@\"", whisperTime, text))
 

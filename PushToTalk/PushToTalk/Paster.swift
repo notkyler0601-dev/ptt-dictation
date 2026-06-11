@@ -59,4 +59,16 @@ final class Paster {
             event?.post(tap: .cghidEventTap)
         }
     }
+
+    /// For voice commands that should execute, not just type. Called after
+    /// paste() returns, which is already past the paste-landed delay.
+    func pressReturn() {
+        let returnKeycode: CGKeyCode = 36
+        for keyDown in [true, false] {
+            let event = CGEvent(
+                keyboardEventSource: nil, virtualKey: returnKeycode, keyDown: keyDown)
+            event?.flags = []
+            event?.post(tap: .cghidEventTap)
+        }
+    }
 }
