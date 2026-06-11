@@ -81,8 +81,8 @@ struct MenuView: View {
     private var statusLine: String {
         switch state.phase {
         case .idle: "Hold \(state.hotkeyLabel) to dictate"
-        case .recording: "Recording…"
-        case .processing: "Transcribing…"
+        case .recording: state.mode == .rewrite ? "Recording instruction…" : "Recording…"
+        case .processing: state.mode == .rewrite ? "Rewriting…" : "Transcribing…"
         }
     }
 
@@ -112,6 +112,7 @@ struct MenuView: View {
         switch status {
         case .ready: .green
         case .loading, .downloading: .orange
+        case .unloaded: .gray
         case .failed: .red
         }
     }

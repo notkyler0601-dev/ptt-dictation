@@ -8,6 +8,8 @@ import ServiceManagement
 /// keys (Prefs.*) at dictation time — no sync layer needed.
 struct SettingsView: View {
     @AppStorage(Prefs.hotkey) private var hotkeyRaw = HotkeyChoice.rightOption.rawValue
+    @AppStorage(Prefs.rewriteHotkey) private var rewriteHotkeyRaw = HotkeyChoice.rightCommand.rawValue
+    @AppStorage(Prefs.memorySaverMinutes) private var memorySaverMinutes = 15
     @AppStorage(Prefs.soundsEnabled) private var soundsEnabled = true
     @AppStorage(Prefs.cleanupEnabled) private var cleanupEnabled = true
     @AppStorage(Prefs.cleanupPrompt) private var cleanupPrompt = Cleaner.systemPrompt
@@ -35,6 +37,35 @@ struct SettingsView: View {
                 .onChange(of: hotkeyRaw) { _, raw in
                     AppState.shared.setHotkey(HotkeyChoice(rawValue: raw) ?? .rightOption)
                 }
+
+                Picker("Rewrite key", selection: $rewriteHotkeyRaw) {
+                    Text("Off").tag("off")
+                    ForEach(HotkeyChoice.allCases) { choice in
+                        Text(choice.label).tag(choice.rawValue)
+                    }
+                }
+                .onChange(of: rewriteHotkeyRaw) { _, raw in
+                    AppState.shared.setRewriteHotkey(raw)
+                }
+                Text("Select text in any app, hold the rewrite key, and speak an instruction (\"make this more formal\") — the local LLM replaces the selection.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if rewriteHotkeyRaw == hotkeyRaw {
+                    Text("The rewrite key must differ from the push-to-talk key — rewrite is disabled while they match.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
+                Picker("Unload models when idle", selection: $memorySaverMinutes) {
+                    Text("Never").tag(0)
+                    Text("After 5 minutes").tag(5)
+                    Text("After 15 minutes").tag(15)
+                    Text("After 30 minutes").tag(30)
+                    Text("After 1 hour").tag(60)
+                }
+                Text("Frees ~4 GB of RAM when you're not dictating. The first dictation afterwards reloads the models (a few seconds).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 Toggle("Sound feedback (Tink on start, Pop on paste)", isOn: $soundsEnabled)
 

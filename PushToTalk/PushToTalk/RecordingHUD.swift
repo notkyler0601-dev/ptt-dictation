@@ -22,15 +22,16 @@ struct RecordingHUD: View {
                         // Ripples the symbol's layers continuously — the
                         // "I'm working" pulse.
                         .symbolEffect(.variableColor.iterative, options: .repeating)
-                    Text("Transcribing…")
+                    Text(state.mode == .rewrite ? "Rewriting…" : "Transcribing…")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white.opacity(0.9))
                 }
             default:
                 HStack(spacing: 12) {
-                    Image(systemName: "mic.fill")
+                    // Orange pencil = rewrite hold, red mic = dictation.
+                    Image(systemName: state.mode == .rewrite ? "pencil.line" : "mic.fill")
                         .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(.red)
+                        .foregroundStyle(state.mode == .rewrite ? .orange : .red)
 
                     HStack(spacing: 3) {
                         ForEach(state.hudLevels.indices, id: \.self) { index in

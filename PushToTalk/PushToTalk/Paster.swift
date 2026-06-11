@@ -49,25 +49,45 @@ final class Paster {
         }
     }
 
-    private func pressCmdV() {
-        for keyDown in [true, false] {
-            let event = CGEvent(
-                keyboardEventSource: nil, virtualKey: Self.vKeycode, keyDown: keyDown)
-            // Explicit flags: the event carries exactly Cmd, regardless of
-            // what physical modifiers happen to be held at that moment.
-            event?.flags = .maskCommand
-            event?.post(tap: .cghidEventTap)
-        }
+    /// Grabs the frontmost app's current selection by synthesizing Cmd+C
+    /// and watching the pasteboard, then restores the user's clipboard.
+    /// Returns nil when nothing got copied — pasteboard `changeCount` is
+    /// the tell: it only bumps if some app actually serviced the copy.
+    func captureSelection() async -> String? {
+        let pasteboard = NSPasteboard.general
+        let saved = pasteboard.string(forType: .string)
+        let countBefore = pasteboard.changeCount
+
+        press(key: Self.cKeycode, flags: .maskCommand)
+        // Give the target app a beat to service the copy.
+        try? await Task.sleep(for: .seconds(0.25))
+
+        guard pasteboard.changeCount != countBefore else { return nil }
+        let selection = pasteboard.string(forType: .string)
+        pasteboard.clearContents()
+        if let saved { pasteboard.setString(saved, forType: .string) }
+        return selection
     }
 
     /// For voice commands that should execute, not just type. Called after
     /// paste() returns, which is already past the paste-landed delay.
     func pressReturn() {
-        let returnKeycode: CGKeyCode = 36
+        press(key: 36, flags: [])  // kVK_Return
+    }
+
+    private static let cKeycode: CGKeyCode = 8  // ANSI 'C'
+
+    private func pressCmdV() {
+        // Explicit flags: the event carries exactly Cmd, regardless of
+        // what physical modifiers happen to be held at that moment.
+        press(key: Self.vKeycode, flags: .maskCommand)
+    }
+
+    private func press(key: CGKeyCode, flags: CGEventFlags) {
         for keyDown in [true, false] {
             let event = CGEvent(
-                keyboardEventSource: nil, virtualKey: returnKeycode, keyDown: keyDown)
-            event?.flags = []
+                keyboardEventSource: nil, virtualKey: key, keyDown: keyDown)
+            event?.flags = flags
             event?.post(tap: .cghidEventTap)
         }
     }

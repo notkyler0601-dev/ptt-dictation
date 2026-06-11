@@ -47,6 +47,14 @@ actor Transcriber {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Memory saver: drop the resident pipeline (~1.5 GB back to the OS).
+    /// The next transcribe() reloads from disk cache automatically via
+    /// ensureLoaded — a few seconds, once.
+    func unload() {
+        pipe = nil
+        loading = nil
+    }
+
     private func ensureLoaded(
         progress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws {

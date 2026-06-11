@@ -4,10 +4,19 @@ import SwiftUI
 /// pipeline (reads at dictation time).
 enum Prefs {
     static let hotkey = "hotkey"
+    static let rewriteHotkey = "rewriteHotkey"  // HotkeyChoice rawValue or "off"
     static let soundsEnabled = "soundsEnabled"
     static let cleanupEnabled = "cleanupEnabled"
     static let cleanupPrompt = "cleanupPrompt"
     static let voiceCommands = "voiceCommands"
+    static let memorySaverMinutes = "memorySaverMinutes"  // 0 = never unload
+}
+
+/// What a hold of a hotkey means: plain dictation, or rewriting the
+/// current selection per a spoken instruction.
+enum DictationMode {
+    case dictate
+    case rewrite
 }
 
 /// Where the dictation pipeline currently is. The pipeline moves this
@@ -43,6 +52,7 @@ enum ModelStatus {
     case loading
     case downloading(percent: Int)
     case ready
+    case unloaded
     case failed(String)
 
     var text: String {
@@ -50,6 +60,7 @@ enum ModelStatus {
         case .loading: "loading…"
         case .downloading(let percent): "downloading… \(percent)%"
         case .ready: "ready"
+        case .unloaded: "unloaded (idle)"
         case .failed(let reason): "failed: \(reason)"
         }
     }
@@ -92,6 +103,9 @@ final class AppState {
     /// Mirror of the active hotkey's display name (the manager itself is
     /// @ObservationIgnored, so views can't observe it directly).
     var hotkeyLabel = HotkeyChoice.rightOption.label
+    /// Whether the current hold is dictation or selection-rewrite — drives
+    /// the HUD's wording and icon.
+    var mode: DictationMode = .dictate
 
     private static let restingLevels = [CGFloat](repeating: 0, count: 12)
     /// Port of the prototype's MIN_RECORD_SECONDS: near-empty audio makes
@@ -109,11 +123,19 @@ final class AppState {
     /// form. Each dictation awaits the previous one, so rapid-fire
     /// dictations queue in order instead of interleaving.
     @ObservationIgnored private var pipelineTask: Task<Void, Never>?
+    /// Selection capture kicked off at rewrite-key press; awaited by the
+    /// rewrite pipeline after release.
+    @ObservationIgnored private var selectionTask: Task<String?, Never>?
+    /// Memory saver bookkeeping.
+    @ObservationIgnored private var lastActivity = Date()
+    @ObservationIgnored private var idleTimer: Timer?
 
     func start() {
         UserDefaults.standard.register(defaults: [
             Prefs.soundsEnabled: true,
             Prefs.cleanupEnabled: true,
+            Prefs.rewriteHotkey: HotkeyChoice.rightCommand.rawValue,
+            Prefs.memorySaverMinutes: 15,
         ])
 
         if let raw = UserDefaults.standard.string(forKey: Prefs.hotkey),
@@ -121,9 +143,20 @@ final class AppState {
             hotkey.hotkey = choice
             hotkeyLabel = choice.label
         }
+        if let raw = UserDefaults.standard.string(forKey: Prefs.rewriteHotkey) {
+            hotkey.rewriteHotkey = HotkeyChoice(rawValue: raw)  // nil for "off"
+        }
         hotkey.onPress = { [weak self] in self?.beginDictation() }
         hotkey.onRelease = { [weak self] in self?.endDictation() }
+        hotkey.onRewritePress = { [weak self] in self?.beginRewrite() }
+        hotkey.onRewriteRelease = { [weak self] in self?.endRewrite() }
         hotkeyReady = hotkey.start()
+
+        // Memory saver: check once a minute whether the models have sat
+        // idle long enough to be worth their ~4 GB.
+        idleTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in
+            DispatchQueue.main.async { AppState.shared.checkIdleUnload() }
+        }
 
         recorder.onLevel = { [weak self] level in self?.pushLevel(CGFloat(level)) }
         // Settle the mic permission dialog at launch, not mid-dictation.
@@ -172,6 +205,11 @@ final class AppState {
         UserDefaults.standard.set(choice.rawValue, forKey: Prefs.hotkey)
     }
 
+    func setRewriteHotkey(_ raw: String) {
+        hotkey.rewriteHotkey = HotkeyChoice(rawValue: raw)  // nil for "off"
+        UserDefaults.standard.set(raw, forKey: Prefs.rewriteHotkey)
+    }
+
     /// Coalesce noisy Progress callbacks into whole-percent menu updates.
     func setDownloadProgress(_ fraction: Double, for status: ReferenceWritableKeyPath<AppState, ModelStatus>) {
         let percent = Int(fraction * 100)
@@ -197,6 +235,10 @@ final class AppState {
     }
 
     private func beginDictation() {
+        // Ignore if the other hotkey already has a recording going.
+        guard phase != .recording else { return }
+        mode = .dictate
+        lastActivity = Date()
         phase = .recording
         hudLevels = Self.restingLevels
         play("Tink")
@@ -215,6 +257,7 @@ final class AppState {
     }
 
     private func endDictation() {
+        guard phase == .recording, mode == .dictate else { return }
         let samples = recorder.stop()
 
         let duration = Double(samples.count) / AudioRecorder.sampleRate
@@ -238,8 +281,12 @@ final class AppState {
 
     private func process(_ samples: [Float]) async {
         do {
+            // A memory-saver-unloaded model reloads inside transcribe();
+            // reflect that in the menu instead of looking frozen.
+            if case .unloaded = whisperStatus { whisperStatus = .loading }
             var started = Date()
             var text = try await transcriber.transcribe(samples)
+            whisperStatus = .ready
             let whisperTime = Date().timeIntervalSince(started)
             if text.isEmpty {
                 // Whisper on borderline audio: skip rather than paste junk.
@@ -271,11 +318,13 @@ final class AppState {
                 let words = text.split(whereSeparator: \.isWhitespace).count
                 let defaults = UserDefaults.standard
                 if defaults.bool(forKey: Prefs.cleanupEnabled), words >= Cleaner.minWords {
+                    if case .unloaded = cleanupStatus { cleanupStatus = .loading }
                     started = Date()
                     do {
                         let prompt = defaults.string(forKey: Prefs.cleanupPrompt)
                             ?? Cleaner.systemPrompt
                         text = try await cleaner.cleanup(text, prompt: prompt)
+                        cleanupStatus = .ready
                         print(String(format: "  cleanup [%.2fs]: \"%@\"",
                                      Date().timeIntervalSince(started), text))
                     } catch {
@@ -307,6 +356,133 @@ final class AppState {
         if phase == .processing {
             phase = .idle
             overlay?.hide()
+        }
+        lastActivity = Date()
+    }
+
+    // MARK: Rewrite mode
+
+    private func beginRewrite() {
+        guard phase != .recording else { return }
+        mode = .rewrite
+        lastActivity = Date()
+        phase = .recording
+        hudLevels = Self.restingLevels
+        play("Tink")
+
+        // Snapshot the selection now, while we record the instruction —
+        // by release time both are ready.
+        selectionTask = Task { await self.paster.captureSelection() }
+
+        do {
+            try recorder.start()
+        } catch {
+            print("recorder failed to start: \(error)")
+        }
+
+        if overlay == nil { overlay = OverlayPanel(state: self) }
+        overlay?.show()
+    }
+
+    private func endRewrite() {
+        guard phase == .recording, mode == .rewrite else { return }
+        let samples = recorder.stop()
+
+        let duration = Double(samples.count) / AudioRecorder.sampleRate
+        guard duration >= Self.minRecordSeconds else {
+            print(String(format: "  (ignored %.2fs rewrite tap)", duration))
+            phase = .idle
+            overlay?.hide()
+            return
+        }
+
+        phase = .processing
+        let selection = selectionTask
+        pipelineTask = Task { [previous = pipelineTask] in
+            _ = await previous?.result
+            await self.processRewrite(samples, selection: await selection?.value)
+        }
+    }
+
+    private func processRewrite(_ samples: [Float], selection: String?) async {
+        do {
+            if case .unloaded = whisperStatus { whisperStatus = .loading }
+            let instruction = try await transcriber.transcribe(samples)
+            whisperStatus = .ready
+            guard !instruction.isEmpty else {
+                print("  (rewrite: empty instruction)")
+                return finishRewrite()
+            }
+            guard let selection, !selection.isEmpty else {
+                print("  (rewrite: no text selected)")
+                return finishRewrite()
+            }
+            print("  rewrite: \"\(instruction)\" on \(selection.count) chars")
+
+            if case .unloaded = cleanupStatus { cleanupStatus = .loading }
+            let started = Date()
+            guard let rewritten = try await cleaner.rewrite(selection, instruction: instruction) else {
+                cleanupStatus = .ready
+                print("  (rewrite refused by rails — leaving text unchanged)")
+                return finishRewrite()
+            }
+            cleanupStatus = .ready
+            print(String(format: "  rewrite [%.2fs]: \"%@\"",
+                         Date().timeIntervalSince(started), rewritten))
+
+            history.insert(
+                DictationRecord(text: rewritten, date: Date(),
+                                duration: Double(samples.count) / AudioRecorder.sampleRate),
+                at: 0)
+            if history.count > 20 { history.removeLast(history.count - 20) }
+
+            if !paster.hasPermission {
+                print("  (paste skipped: Accessibility not granted)")
+                pasteReady = false
+            } else {
+                // The original selection is still highlighted in the target
+                // app, so this paste replaces it.
+                await paster.paste(rewritten)
+                play("Pop")
+            }
+        } catch {
+            print("  rewrite failed: \(error)")
+        }
+        finishRewrite()
+    }
+
+    private func finishRewrite() {
+        if phase == .processing {
+            phase = .idle
+            overlay?.hide()
+        }
+        mode = .dictate
+        lastActivity = Date()
+    }
+
+    // MARK: Memory saver
+
+    /// Unload resident models after the configured idle period; the next
+    /// dictation's ensureLoaded() brings them back transparently (paying a
+    /// few seconds, once). A deliberate, user-configurable exception to
+    /// Gotcha 8's models-stay-resident rule.
+    func checkIdleUnload() {
+        let minutes = UserDefaults.standard.integer(forKey: Prefs.memorySaverMinutes)
+        guard minutes > 0, phase == .idle,
+              Date().timeIntervalSince(lastActivity) > Double(minutes) * 60
+        else { return }
+
+        var unloadWhisper = false, unloadCleaner = false
+        if case .ready = whisperStatus { unloadWhisper = true }
+        if case .ready = cleanupStatus { unloadCleaner = true }
+        guard unloadWhisper || unloadCleaner else { return }
+
+        print("(memory saver: unloading models after \(minutes) min idle)")
+        if unloadWhisper { whisperStatus = .unloaded }
+        if unloadCleaner { cleanupStatus = .unloaded }
+        Task {
+            if unloadWhisper { await transcriber.unload() }
+            if unloadCleaner { await cleaner.unload() }
         }
     }
 

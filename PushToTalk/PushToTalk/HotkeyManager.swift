@@ -50,18 +50,26 @@ enum HotkeyChoice: String, CaseIterable, Identifiable {
     }
 }
 
-/// System-wide listener for the push-to-talk key, built on a CGEventTap.
+/// System-wide listener for the push-to-talk key (and the optional rewrite
+/// key), built on a CGEventTap.
 final class HotkeyManager {
     /// Called on the main thread when the hotkey goes down / comes up.
     var onPress: () -> Void = {}
     var onRelease: () -> Void = {}
+    /// Rewrite-mode key callbacks (hold, speak an instruction, release).
+    var onRewritePress: () -> Void = {}
+    var onRewriteRelease: () -> Void = {}
 
     /// Settable live from Settings; the tap itself doesn't change (it
     /// always watches flagsChanged), only the matching logic does.
     var hotkey: HotkeyChoice = .rightOption
+    /// nil disables rewrite. If set equal to `hotkey`, the main key wins
+    /// (it's matched first) and rewrite simply never fires.
+    var rewriteHotkey: HotkeyChoice?
 
     private var tap: CFMachPort?
     private var hotkeyDown = false
+    private var rewriteDown = false
 
     /// Listen-only event taps are gated by the Input Monitoring TCC
     /// permission. Creating a tap without it just returns nil, so check
@@ -118,18 +126,22 @@ final class HotkeyManager {
             return
         }
 
-        guard type == .flagsChanged,
-              event.getIntegerValueField(.keyboardEventKeycode) == hotkey.keycode
-        else { return }
+        guard type == .flagsChanged else { return }
+        let keycode = event.getIntegerValueField(.keyboardEventKeycode)
 
-        let down = hotkey.isDown(event.flags)
-        guard down != hotkeyDown else { return }
-        hotkeyDown = down
-
-        // Gotcha 3: return from the tap callback in microseconds. Even
-        // though our handlers are cheap today, dispatching keeps the
-        // contract honest when later stages hang real work off these.
-        let callback = down ? onPress : onRelease
-        DispatchQueue.main.async { callback() }
+        // Gotcha 3 still applies throughout: decide fast, dispatch, return.
+        if keycode == hotkey.keycode {
+            let down = hotkey.isDown(event.flags)
+            guard down != hotkeyDown else { return }
+            hotkeyDown = down
+            let callback = down ? onPress : onRelease
+            DispatchQueue.main.async { callback() }
+        } else if let rewrite = rewriteHotkey, keycode == rewrite.keycode {
+            let down = rewrite.isDown(event.flags)
+            guard down != rewriteDown else { return }
+            rewriteDown = down
+            let callback = down ? onRewritePress : onRewriteRelease
+            DispatchQueue.main.async { callback() }
+        }
     }
 }
