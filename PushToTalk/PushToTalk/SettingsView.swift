@@ -20,6 +20,9 @@ struct SettingsView: View {
     /// Voice command rules: edited here as local state, persisted to
     /// UserDefaults on every change (the pipeline re-reads per dictation).
     @State private var voiceCommands = VoiceCommandStore.load()
+    /// Non-nil while the editor sheet is up — either an existing command
+    /// (pencil button) or a fresh blank one (Add Command).
+    @State private var editingCommand: VoiceCommand?
 
     var body: some View {
         Form {
@@ -76,36 +79,59 @@ struct SettingsView: View {
             }
 
             Section("Voice commands") {
-                Text("If a dictation matches a phrase exactly (case and punctuation are ignored), the text on the right is typed instead. Turn on ⏎ to also press Return — useful in a terminal, so \"cd downloads\" actually runs `cd ~/Downloads`.")
+                Text("If a dictation matches a phrase exactly (case and punctuation are ignored), the mapped text is typed instead. Commands with ⏎ also press Return — useful in a terminal, so \"cd downloads\" actually runs `cd ~/Downloads`.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                ForEach($voiceCommands) { $command in
-                    HStack(spacing: 8) {
-                        TextField("Say… (cd downloads)", text: $command.phrase)
-                        Image(systemName: "arrow.right")
-                            .foregroundStyle(.tertiary)
-                        TextField("Type… (cd ~/Downloads)", text: $command.replacement)
-                            .font(.system(.body, design: .monospaced))
-                        Toggle("⏎", isOn: $command.pressReturn)
-                            .toggleStyle(.checkbox)
-                            .help("Press Return after typing (runs the command)")
+                ForEach(voiceCommands) { command in
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("“\(command.phrase)”")
+                            Text(command.replacement)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if command.pressReturn {
+                            Image(systemName: "return")
+                                .foregroundStyle(.secondary)
+                                .help("Presses Return after typing")
+                        }
+                        Button {
+                            editingCommand = command
+                        } label: {
+                            Image(systemName: "pencil")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Edit")
                         Button {
                             voiceCommands.removeAll { $0.id == command.id }
+                            VoiceCommandStore.save(voiceCommands)
                         } label: {
                             Image(systemName: "minus.circle.fill")
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.borderless)
+                        .help("Delete")
                     }
                 }
 
-                Button("Add Command") {
-                    voiceCommands.append(VoiceCommand(phrase: "", replacement: ""))
+                Button("Add Command…") {
+                    editingCommand = VoiceCommand(phrase: "", replacement: "")
                 }
             }
-            .onChange(of: voiceCommands) { _, commands in
-                VoiceCommandStore.save(commands)
+            // Sheet instead of inline row editing: text fields inside Form
+            // rows on macOS often refuse focus (long-standing SwiftUI bug);
+            // a sheet's fields are ordinary and dependable.
+            .sheet(item: $editingCommand) { command in
+                VoiceCommandEditor(command: command) { saved in
+                    if let index = voiceCommands.firstIndex(where: { $0.id == saved.id }) {
+                        voiceCommands[index] = saved
+                    } else {
+                        voiceCommands.append(saved)
+                    }
+                    VoiceCommandStore.save(voiceCommands)
+                }
             }
 
             Section("Models (downloaded on first launch, then cached)") {
@@ -120,6 +146,56 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 540)
         .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Editor sheet for one voice command. Local @State copies, committed to
+/// the caller only on Save — Cancel discards cleanly.
+struct VoiceCommandEditor: View {
+    private let id: UUID
+    @State private var phrase: String
+    @State private var replacement: String
+    @State private var pressReturn: Bool
+    let onSave: (VoiceCommand) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    init(command: VoiceCommand, onSave: @escaping (VoiceCommand) -> Void) {
+        self.id = command.id
+        _phrase = State(initialValue: command.phrase)
+        _replacement = State(initialValue: command.replacement)
+        _pressReturn = State(initialValue: command.pressReturn)
+        self.onSave = onSave
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Voice Command")
+                .font(.headline)
+
+            Form {
+                TextField("When I say", text: $phrase, prompt: Text("cd downloads"))
+                TextField("Type this", text: $replacement, prompt: Text("cd ~/Downloads"))
+                    .font(.system(.body, design: .monospaced))
+                Toggle("Press Return after typing (runs it)", isOn: $pressReturn)
+            }
+
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Save") {
+                    onSave(VoiceCommand(
+                        id: id, phrase: phrase,
+                        replacement: replacement, pressReturn: pressReturn))
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(phrase.trimmingCharacters(in: .whitespaces).isEmpty
+                          || replacement.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 400)
     }
 }
 
