@@ -26,6 +26,13 @@ struct SettingsView: View {
     /// (pencil button) or a fresh blank one (Add Command).
     @State private var editingCommand: VoiceCommand?
 
+    @AppStorage(Prefs.customVocabulary) private var customVocabulary = ""
+    /// Corrections follow the voice-command pattern, but can also gain
+    /// entries from the menu's "fix" flow while this window is open —
+    /// re-loaded in onAppear to pick those up.
+    @State private var corrections = CorrectionStore.load()
+    @State private var editingCorrection: Correction?
+
     var body: some View {
         Form {
             Section("General") {
@@ -109,6 +116,63 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Speech personalization") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Custom vocabulary")
+                    TextEditor(text: $customVocabulary)
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(minHeight: 60)
+                    Text("Names and jargon Whisper should expect, separated by commas — it biases recognition toward these spellings. Grows automatically when transcript fixes teach it new capitalized words.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if !corrections.isEmpty {
+                    Text("Corrections — applied to every transcript: anywhere a phrase on the left appears (case ignored), the right side replaces it. Learned from the ✏️ fix button on the menu's recent dictations, or added here.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(corrections) { correction in
+                    HStack(spacing: 10) {
+                        Text("“\(correction.heard)”")
+                        Image(systemName: "arrow.right")
+                            .foregroundStyle(.secondary)
+                        Text("“\(correction.corrected)”")
+                        Spacer()
+                        Button {
+                            editingCorrection = correction
+                        } label: {
+                            Image(systemName: "pencil")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Edit")
+                        Button {
+                            corrections.removeAll { $0.id == correction.id }
+                            CorrectionStore.save(corrections)
+                        } label: {
+                            Image(systemName: "minus.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Delete")
+                    }
+                }
+
+                Button("Add Correction…") {
+                    editingCorrection = Correction(heard: "", corrected: "")
+                }
+            }
+            .sheet(item: $editingCorrection) { correction in
+                CorrectionEditor(correction: correction) { saved in
+                    if let index = corrections.firstIndex(where: { $0.id == saved.id }) {
+                        corrections[index] = saved
+                    } else {
+                        corrections.append(saved)
+                    }
+                    CorrectionStore.save(corrections)
+                }
+            }
+
             Section("Voice commands") {
                 Text("If a dictation matches a phrase exactly (case and punctuation are ignored), the mapped text is typed instead. Commands with ⏎ also press Return — useful in a terminal, so \"cd downloads\" actually runs `cd ~/Downloads`.")
                     .font(.caption)
@@ -177,6 +241,55 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 540)
         .fixedSize(horizontal: false, vertical: true)
+        .onAppear { corrections = CorrectionStore.load() }
+    }
+}
+
+/// Editor sheet for one correction rule, mirroring VoiceCommandEditor
+/// (sheet for the same Form-field-focus reason).
+struct CorrectionEditor: View {
+    private let id: UUID
+    @State private var heard: String
+    @State private var corrected: String
+    let onSave: (Correction) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    init(correction: Correction, onSave: @escaping (Correction) -> Void) {
+        self.id = correction.id
+        _heard = State(initialValue: correction.heard)
+        _corrected = State(initialValue: correction.corrected)
+        self.onSave = onSave
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Correction")
+                .font(.headline)
+
+            Form {
+                TextField("When Whisper writes", text: $heard, prompt: Text("cube or netties"))
+                TextField("Replace it with", text: $corrected, prompt: Text("Kubernetes"))
+            }
+
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Save") {
+                    onSave(Correction(
+                        id: id,
+                        heard: CorrectionStore.trimPunctuation(
+                            heard.trimmingCharacters(in: .whitespaces)),
+                        corrected: corrected.trimmingCharacters(in: .whitespaces)))
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(heard.trimmingCharacters(in: .whitespaces).isEmpty
+                          || corrected.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 400)
     }
 }
 

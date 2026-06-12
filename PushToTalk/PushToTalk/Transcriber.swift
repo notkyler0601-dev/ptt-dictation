@@ -44,10 +44,30 @@ actor Transcriber {
         try await ensureLoaded(progress: progress)
     }
 
-    func transcribe(_ samples: [Float]) async throws -> String {
+    func transcribe(_ samples: [Float], vocabulary: String? = nil) async throws -> String {
         try await ensureLoaded()
         guard let pipe else { throw TranscriberError.notLoaded }
-        let results = try await pipe.transcribe(audioArray: samples)
+
+        var options = DecodingOptions()
+        if let vocabulary, let tokenizer = pipe.tokenizer {
+            let words = vocabulary
+                .split(whereSeparator: { $0 == "," || $0.isNewline })
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            if !words.isEmpty {
+                // Whisper conditions on promptTokens as if they were the
+                // transcript of the previous 30 s window — biasing decoding
+                // toward these spellings without forcing them. WhisperKit
+                // prepends <|startofprev|>, trims to half the context
+                // window, and strips special tokens itself. The leading
+                // space matters: BPE tokenizes " Vercel" (a word mid-text,
+                // which is how it'll be decoded) differently from "Vercel"
+                // (start of text).
+                options.promptTokens = tokenizer.encode(text: " " + words.joined(separator: ", "))
+            }
+        }
+
+        let results = try await pipe.transcribe(audioArray: samples, decodeOptions: options)
         // One result per ~30 s Whisper window; short dictations yield one.
         return results.map(\.text).joined()
             .trimmingCharacters(in: .whitespacesAndNewlines)

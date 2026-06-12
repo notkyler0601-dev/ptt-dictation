@@ -7,6 +7,11 @@ import SwiftUI
 struct MenuView: View {
     var state: AppState
     @Environment(\.openSettings) private var openSettings
+    /// History row currently in "fix it" mode (nil = none) and its draft
+    /// text. Inline editing instead of a sheet: sheets hanging off the
+    /// MenuBarExtra window are unreliable about keeping it open.
+    @State private var fixingID: UUID?
+    @State private var fixText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -168,30 +173,76 @@ struct MenuView: View {
 
     private func historyRow(_ record: DictationRecord) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(record.text)
-                .font(.callout)
-                .lineLimit(3)
-                .textSelection(.enabled)
-            HStack(spacing: 6) {
-                Text(record.date, style: .time)
-                Text(String(format: "· %.1fs", record.duration))
-                Spacer()
-                Button {
-                    let pb = NSPasteboard.general
-                    pb.clearContents()
-                    pb.setString(record.text, forType: .string)
-                } label: {
-                    Image(systemName: "doc.on.doc")
+            if fixingID == record.id {
+                fixEditor(record)
+            } else {
+                Text(record.text)
+                    .font(.callout)
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+                HStack(spacing: 6) {
+                    Text(record.date, style: .time)
+                    Text(String(format: "· %.1fs", record.duration))
+                    Spacer()
+                    Button {
+                        fixText = record.text
+                        fixingID = record.id
+                    } label: {
+                        Image(systemName: "pencil")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Fix mistakes — the app learns from your correction")
+                    Button {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString(record.text, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Copy transcript")
                 }
-                .buttonStyle(.borderless)
-                .help("Copy transcript")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// The expanded "fix it" face of a history row: edit the transcript to
+    /// what you actually said, see live which rules it will learn, save.
+    @ViewBuilder
+    private func fixEditor(_ record: DictationRecord) -> some View {
+        TextEditor(text: $fixText)
+            .font(.callout)
+            .frame(minHeight: 48, maxHeight: 96)
+
+        let learned = CorrectionStore.extract(from: record.text, to: fixText)
+        if !learned.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(learned.indices, id: \.self) { index in
+                    Text("“\(learned[index].heard)” → “\(learned[index].corrected)”")
+                        .font(.caption)
+                }
+                Text("Will be fixed automatically in future dictations (manage in Settings).")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        HStack {
+            Button("Cancel") { fixingID = nil }
+            Spacer()
+            Button("Save") {
+                state.saveFix(for: record, editedText: fixText)
+                fixingID = nil
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(fixText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .controlSize(.small)
     }
 }
 

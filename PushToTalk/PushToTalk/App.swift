@@ -10,6 +10,8 @@ enum Prefs {
     static let cleanupPrompt = "cleanupPrompt"
     static let voiceCommands = "voiceCommands"
     static let memorySaverMinutes = "memorySaverMinutes"  // 0 = never unload
+    static let customVocabulary = "customVocabulary"  // comma-separated words
+    static let corrections = "corrections"  // [Correction] as JSON
 }
 
 /// What a hold of a hotkey means: plain dictation, or rewriting the
@@ -300,9 +302,14 @@ final class AppState {
             // reflect that in the menu instead of looking frozen.
             if case .unloaded = whisperStatus { whisperStatus = .loading }
             var started = Date()
-            var text = try await transcriber.transcribe(samples)
+            var text = try await transcriber.transcribe(
+                samples,
+                vocabulary: UserDefaults.standard.string(forKey: Prefs.customVocabulary))
             whisperStatus = .ready
             let whisperTime = Date().timeIntervalSince(started)
+            // Learned corrections run before everything downstream — voice
+            // command matching and cleanup both see the fixed text.
+            text = CorrectionStore.apply(to: text)
             if text.isEmpty {
                 // Whisper on borderline audio: skip rather than paste junk.
                 print("  (empty transcript)")
@@ -422,7 +429,10 @@ final class AppState {
     private func processRewrite(_ samples: [Float], selection: String?) async {
         do {
             if case .unloaded = whisperStatus { whisperStatus = .loading }
-            let instruction = try await transcriber.transcribe(samples)
+            let instruction = CorrectionStore.apply(
+                to: try await transcriber.transcribe(
+                    samples,
+                    vocabulary: UserDefaults.standard.string(forKey: Prefs.customVocabulary)))
             whisperStatus = .ready
             guard !instruction.isEmpty else {
                 print("  (rewrite: empty instruction)")
@@ -473,6 +483,58 @@ final class AppState {
         }
         mode = .dictate
         lastActivity = Date()
+    }
+
+    // MARK: Learning from fixes
+
+    /// Called when the user saves an edited transcript from the menu's
+    /// history. The diff against the original becomes correction rules
+    /// (applied to every future transcript), and corrected words that carry
+    /// capitals feed the custom vocabulary so Whisper starts expecting them.
+    func saveFix(for record: DictationRecord, editedText: String) {
+        let edited = editedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !edited.isEmpty else { return }
+
+        let pairs = CorrectionStore.extract(from: record.text, to: edited)
+        if !pairs.isEmpty {
+            var all = CorrectionStore.load()
+            for pair in pairs {
+                if let index = all.firstIndex(where: {
+                    $0.heard.caseInsensitiveCompare(pair.heard) == .orderedSame
+                }) {
+                    // Re-fixing the same mishearing: the latest fix wins.
+                    all[index].corrected = pair.corrected
+                } else {
+                    all.append(pair)
+                }
+            }
+            CorrectionStore.save(all)
+            addToVocabulary(CorrectionStore.vocabularyCandidates(in: pairs))
+        }
+
+        // Reflect the fix in the menu so the row shows what it should have
+        // said (and copy copies the good version).
+        if let index = history.firstIndex(where: { $0.id == record.id }) {
+            history[index] = DictationRecord(
+                text: edited, date: record.date, duration: record.duration)
+        }
+    }
+
+    private func addToVocabulary(_ words: [String]) {
+        guard !words.isEmpty else { return }
+        let defaults = UserDefaults.standard
+        let vocabulary = defaults.string(forKey: Prefs.customVocabulary) ?? ""
+        let existing = Set(vocabulary
+            .split(whereSeparator: { $0 == "," || $0.isNewline })
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() })
+        let new = words.filter { !existing.contains($0.lowercased()) }
+        guard !new.isEmpty else { return }
+
+        let addition = new.joined(separator: ", ")
+        defaults.set(
+            vocabulary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? addition : "\(vocabulary), \(addition)",
+            forKey: Prefs.customVocabulary)
     }
 
     // MARK: Memory saver
