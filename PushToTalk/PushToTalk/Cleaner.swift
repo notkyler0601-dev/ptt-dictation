@@ -147,9 +147,7 @@ actor Cleaner {
         if container != nil { return }
         if loading == nil {
             loading = Task {
-                self.container = try await LLMModelFactory.shared.loadContainer(
-                    configuration: ModelConfiguration(id: Self.modelID),
-                    progressHandler: { progress($0.fractionCompleted) })
+                self.container = try await Self.loadContainer(progress: progress)
             }
         }
         do {
@@ -158,5 +156,35 @@ actor Cleaner {
             loading = nil
             throw error
         }
+    }
+
+    private static func loadContainer(
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> ModelContainer {
+        let hubConfig = ModelConfiguration(id: Self.modelID)
+
+        // Fast path: the model is already on disk. An id-based config does
+        // a Hugging Face listing round-trip on *every* load, cached or not
+        // — on a slow connection that stalled every post-memory-saver
+        // reload. A directory-based config never touches the network.
+        // modelDirectory() just computes where the hub cache for this id
+        // lives; config.json is the marker that a download completed there.
+        let localDir = hubConfig.modelDirectory()
+        if FileManager.default.fileExists(
+            atPath: localDir.appendingPathComponent("config.json").path) {
+            do {
+                return try await LLMModelFactory.shared.loadContainer(
+                    configuration: ModelConfiguration(directory: localDir),
+                    progressHandler: { progress($0.fractionCompleted) })
+            } catch {
+                // Stale/partial cache — fall through to the hub load, which
+                // re-fetches whatever is missing.
+                print("cleanup local-folder load failed, trying hub: \(error)")
+            }
+        }
+
+        return try await LLMModelFactory.shared.loadContainer(
+            configuration: hubConfig,
+            progressHandler: { progress($0.fractionCompleted) })
     }
 }

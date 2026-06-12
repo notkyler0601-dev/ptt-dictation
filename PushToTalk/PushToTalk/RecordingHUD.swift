@@ -22,7 +22,7 @@ struct RecordingHUD: View {
                         // Ripples the symbol's layers continuously — the
                         // "I'm working" pulse.
                         .symbolEffect(.variableColor.iterative, options: .repeating)
-                    Text(state.mode == .rewrite ? "Rewriting…" : "Transcribing…")
+                    Text(state.processingCaption)
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white.opacity(0.9))
                 }

@@ -23,6 +23,12 @@ actor Transcriber {
         case notLoaded
     }
 
+    /// UserDefaults key for the model folder the first successful load
+    /// resolved. Later loads (next launch, or a reload after the memory
+    /// saver unloads) go straight to this folder — loading from an explicit
+    /// folder never touches the network.
+    private static let cachedFolderKey = "whisperModelFolder"
+
     /// The resident pipeline. Stays inside the actor; a non-Sendable type
     /// that never crosses an isolation boundary needs no Sendable proof.
     private var pipe: WhisperKit?
@@ -63,21 +69,7 @@ actor Transcriber {
             // Task {} inside an actor inherits its isolation, so writing
             // self.pipe from the task body is actor-safe.
             loading = Task {
-                let config = WhisperKitConfig(model: Self.modelName, prewarm: true)
-                // Download explicitly first so we can surface progress;
-                // already-cached files are skipped, so this is cheap on
-                // later launches. If it fails (e.g. offline with a full
-                // cache), fall back to letting init resolve the model.
-                do {
-                    let folder = try await WhisperKit.download(
-                        variant: Self.modelName,
-                        progressCallback: { progress($0.fractionCompleted) }
-                    )
-                    config.modelFolder = folder.path
-                } catch {
-                    print("whisper download check failed (trying cache): \(error)")
-                }
-                self.pipe = try await WhisperKit(config)
+                self.pipe = try await Self.loadPipeline(progress: progress)
             }
         }
         do {
@@ -88,5 +80,51 @@ actor Transcriber {
             loading = nil
             throw error
         }
+    }
+
+    private static func loadPipeline(
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> WhisperKit {
+        let defaults = UserDefaults.standard
+
+        // Fast path: a previous load already resolved the model folder.
+        // WhisperKit.download "skips" cached files but still does a Hugging
+        // Face listing round-trip to decide that — on a slow or flaky
+        // connection that check stalled every post-memory-saver reload,
+        // leaving dictations stuck on "Transcribing…". An explicit folder
+        // skips the hub entirely.
+        if let cached = defaults.string(forKey: cachedFolderKey),
+           FileManager.default.fileExists(atPath: cached) {
+            let config = WhisperKitConfig(model: modelName, prewarm: true)
+            config.modelFolder = cached
+            do {
+                return try await WhisperKit(config)
+            } catch {
+                // Folder went stale (partial delete, WhisperKit layout
+                // change): forget it and fall through to a fresh download.
+                print("whisper cached-folder load failed, redownloading: \(error)")
+                defaults.removeObject(forKey: cachedFolderKey)
+            }
+        }
+
+        let config = WhisperKitConfig(model: modelName, prewarm: true)
+        // Download explicitly so we can surface progress. If the check
+        // fails (e.g. offline with a full cache), fall back to letting
+        // init resolve the model by name.
+        do {
+            let folder = try await WhisperKit.download(
+                variant: modelName,
+                progressCallback: { progress($0.fractionCompleted) }
+            )
+            config.modelFolder = folder.path
+        } catch {
+            print("whisper download check failed (trying cache): \(error)")
+        }
+        let pipe = try await WhisperKit(config)
+        // Only remember the folder once a load from it has succeeded.
+        if let folder = config.modelFolder {
+            defaults.set(folder, forKey: cachedFolderKey)
+        }
+        return pipe
     }
 }

@@ -107,6 +107,21 @@ final class AppState {
     /// the HUD's wording and icon.
     var mode: DictationMode = .dictate
 
+    /// Caption for the HUD's processing face. "Transcribing…" would be a
+    /// lie while a memory-saver-unloaded model is still reloading — and a
+    /// model (re)load is the one genuinely slow step in the pipeline, so
+    /// when one is in flight, say that instead.
+    var processingCaption: String {
+        for status in [whisperStatus, cleanupStatus] {
+            switch status {
+            case .loading: return "Loading model…"
+            case .downloading(let percent): return "Downloading model… \(percent)%"
+            default: break
+            }
+        }
+        return mode == .rewrite ? "Rewriting…" : "Transcribing…"
+    }
+
     private static let restingLevels = [CGFloat](repeating: 0, count: 12)
     /// Port of the prototype's MIN_RECORD_SECONDS: near-empty audio makes
     /// Whisper hallucinate phrases like "Thank you." (Gotcha 6).
