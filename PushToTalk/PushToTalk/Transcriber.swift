@@ -1,4 +1,5 @@
 import Foundation
+import os
 // @preconcurrency: WhisperKit hasn't adopted Sendable annotations yet, so
 // without this every hand-off of the pipeline across our actor boundary
 // warns. It relaxes exactly those checks for this one module's types.
@@ -102,10 +103,14 @@ actor Transcriber {
         }
     }
 
+    private static let log = Logger(
+        subsystem: "Kyler-Zheng.PushToTalk", category: "whisper")
+
     private static func loadPipeline(
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> WhisperKit {
         let defaults = UserDefaults.standard
+        let started = Date()
 
         // Fast path: a previous load already resolved the model folder.
         // WhisperKit.download "skips" cached files but still does a Hugging
@@ -118,7 +123,9 @@ actor Transcriber {
             let config = WhisperKitConfig(model: modelName, prewarm: true)
             config.modelFolder = cached
             do {
-                return try await WhisperKit(config)
+                let pipe = try await WhisperKit(config)
+                log.notice("whisper loaded from cached folder in \(Date().timeIntervalSince(started), format: .fixed(precision: 1))s")
+                return pipe
             } catch {
                 // Folder went stale (partial delete, WhisperKit layout
                 // change): forget it and fall through to a fresh download.
@@ -141,6 +148,7 @@ actor Transcriber {
             print("whisper download check failed (trying cache): \(error)")
         }
         let pipe = try await WhisperKit(config)
+        log.notice("whisper loaded via download path in \(Date().timeIntervalSince(started), format: .fixed(precision: 1))s")
         // Only remember the folder once a load from it has succeeded.
         if let folder = config.modelFolder {
             defaults.set(folder, forKey: cachedFolderKey)

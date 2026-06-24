@@ -87,7 +87,7 @@ struct MenuView: View {
         switch state.phase {
         case .idle: "Hold \(state.hotkeyLabel) to dictate"
         case .recording: state.mode == .rewrite ? "Recording instruction…" : "Recording…"
-        case .processing: state.mode == .rewrite ? "Rewriting…" : "Transcribing…"
+        case .processing: state.processingCaption
         }
     }
 

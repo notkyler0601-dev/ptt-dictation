@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import os
 
 /// UserDefaults keys, shared between SettingsView (@AppStorage) and the
 /// pipeline (reads at dictation time).
@@ -108,11 +110,14 @@ final class AppState {
     /// Whether the current hold is dictation or selection-rewrite — drives
     /// the HUD's wording and icon.
     var mode: DictationMode = .dictate
+    /// Which stage of processing is actually running, for the HUD caption.
+    enum ProcessingStep { case transcribing, cleaning }
+    var processingStep: ProcessingStep = .transcribing
 
-    /// Caption for the HUD's processing face. "Transcribing…" would be a
-    /// lie while a memory-saver-unloaded model is still reloading — and a
-    /// model (re)load is the one genuinely slow step in the pipeline, so
-    /// when one is in flight, say that instead.
+    /// Caption for the HUD's processing face, naming the stage that is
+    /// actually running. "Transcribing…" would be a lie while a
+    /// memory-saver-unloaded model reloads (the one genuinely slow step)
+    /// or during the LLM cleanup pass (seconds on long dictations).
     var processingCaption: String {
         for status in [whisperStatus, cleanupStatus] {
             switch status {
@@ -121,8 +126,17 @@ final class AppState {
             default: break
             }
         }
-        return mode == .rewrite ? "Rewriting…" : "Transcribing…"
+        if mode == .rewrite { return "Rewriting…" }
+        return processingStep == .cleaning ? "Cleaning up…" : "Transcribing…"
     }
+
+    /// Stage timings land in the unified system log (Console.app, or
+    /// `log show --predicate 'subsystem == "Kyler-Zheng.PushToTalk"'`) —
+    /// print() is invisible outside Xcode, which made slowness reports
+    /// undiagnosable. Numbers only, never transcript content: the unified
+    /// log persists to disk, and transcripts must not outlive the process.
+    private static let log = Logger(
+        subsystem: "Kyler-Zheng.PushToTalk", category: "pipeline")
 
     private static let restingLevels = [CGFloat](repeating: 0, count: 12)
     /// Port of the prototype's MIN_RECORD_SECONDS: near-empty audio makes
@@ -143,6 +157,12 @@ final class AppState {
     /// Selection capture kicked off at rewrite-key press; awaited by the
     /// rewrite pipeline after release.
     @ObservationIgnored private var selectionTask: Task<String?, Never>?
+    /// The app that was frontmost when the current hold began — i.e. where
+    /// the user means the text to go. Captured at key-down, snapshotted into
+    /// each pipeline at key-up, and re-focused right before the paste so a
+    /// slow transcription can't drop the text into whatever window the user
+    /// drifted to while waiting.
+    @ObservationIgnored private var targetApp: NSRunningApplication?
     /// Memory saver bookkeeping.
     @ObservationIgnored private var lastActivity = Date()
     @ObservationIgnored private var idleTimer: Timer?
@@ -255,6 +275,10 @@ final class AppState {
         // Ignore if the other hotkey already has a recording going.
         guard phase != .recording else { return }
         mode = .dictate
+        // Snapshot where the user is *now* — we're a background agent, so
+        // pressing the hotkey doesn't steal frontmost from their target app.
+        // This is where the paste must land, however long transcription takes.
+        targetApp = NSWorkspace.shared.frontmostApplication
         lastActivity = Date()
         phase = .recording
         hudLevels = Self.restingLevels
@@ -287,16 +311,22 @@ final class AppState {
 
         // Keep the HUD up — it switches to its "Transcribing…" face via the
         // phase change, and hides when the pipeline goes idle.
+        processingStep = .transcribing
         phase = .processing
+        // Snapshot per-pipeline: if the user fires another dictation while
+        // this one is still transcribing, beginDictation overwrites
+        // targetApp — carry our own copy into the task so the paste returns
+        // to the right window.
+        let target = targetApp
         pipelineTask = Task { [previous = pipelineTask] in
             // Serialization point: wait for the previous dictation's
             // pipeline before starting ours.
             _ = await previous?.result
-            await self.process(samples)
+            await self.process(samples, target: target)
         }
     }
 
-    private func process(_ samples: [Float]) async {
+    private func process(_ samples: [Float], target: NSRunningApplication?) async {
         do {
             // A memory-saver-unloaded model reloads inside transcribe();
             // reflect that in the menu instead of looking frozen.
@@ -328,19 +358,23 @@ final class AppState {
                     print("  (paste skipped: Accessibility not granted)")
                     pasteReady = false
                 } else {
-                    await paster.paste(command.replacement)
+                    finishProcessing()
+                    await paster.paste(command.replacement, into: target)
                     if command.pressReturn { paster.pressReturn() }
                     play("Pop")
                 }
             } else {
                 print(String(format: "  whisper [%.2fs]: \"%@\"", whisperTime, text))
+                let audioSeconds = Double(samples.count) / AudioRecorder.sampleRate
 
                 // Short utterances paste raw — keeps them instant
                 // (prototype: CLEANUP_MIN_WORDS).
                 let words = text.split(whereSeparator: \.isWhitespace).count
+                Self.log.notice("whisper: \(whisperTime, format: .fixed(precision: 2))s for \(audioSeconds, format: .fixed(precision: 1))s of audio, \(words) words")
                 let defaults = UserDefaults.standard
                 if defaults.bool(forKey: Prefs.cleanupEnabled), words >= Cleaner.minWords {
                     if case .unloaded = cleanupStatus { cleanupStatus = .loading }
+                    processingStep = .cleaning
                     started = Date()
                     do {
                         let prompt = defaults.string(forKey: Prefs.cleanupPrompt)
@@ -353,6 +387,7 @@ final class AppState {
                         // Cleanup is best-effort; the transcript still lands.
                         print("  cleanup failed (pasting raw): \(error)")
                     }
+                    Self.log.notice("cleanup: \(Date().timeIntervalSince(started), format: .fixed(precision: 2))s for \(words) words")
                 }
 
                 // Record before pasting so the transcript is recoverable
@@ -366,15 +401,32 @@ final class AppState {
                     print("  (paste skipped: Accessibility not granted)")
                     pasteReady = false
                 } else {
-                    await paster.paste(text)
+                    Self.log.notice("pasting \(text.count) chars")
+                    finishProcessing()
+                    await paster.paste(text, into: target)
                     play("Pop")
                 }
             }
         } catch {
             print("  transcription failed: \(error)")
+            Self.log.error("transcription failed: \(error)")
         }
         // Don't clobber the phase (or the HUD) if the user is already
         // holding the key for the next dictation.
+        if phase == .processing {
+            phase = .idle
+            overlay?.hide()
+        }
+        lastActivity = Date()
+    }
+
+    /// Ends the user-visible part of a dictation the moment the paste is
+    /// about to post — paste() keeps running ~0.4 s after Cmd+V to restore
+    /// the clipboard, and holding the "Transcribing…" pill through that
+    /// delay made every dictation feel slower than it was. The pipeline
+    /// task itself keeps running; the next dictation still serializes
+    /// behind the restore.
+    private func finishProcessing() {
         if phase == .processing {
             phase = .idle
             overlay?.hide()
@@ -387,6 +439,7 @@ final class AppState {
     private func beginRewrite() {
         guard phase != .recording else { return }
         mode = .rewrite
+        targetApp = NSWorkspace.shared.frontmostApplication
         lastActivity = Date()
         phase = .recording
         hudLevels = Self.restingLevels
@@ -420,13 +473,14 @@ final class AppState {
 
         phase = .processing
         let selection = selectionTask
+        let target = targetApp
         pipelineTask = Task { [previous = pipelineTask] in
             _ = await previous?.result
-            await self.processRewrite(samples, selection: await selection?.value)
+            await self.processRewrite(samples, selection: await selection?.value, target: target)
         }
     }
 
-    private func processRewrite(_ samples: [Float], selection: String?) async {
+    private func processRewrite(_ samples: [Float], selection: String?, target: NSRunningApplication?) async {
         do {
             if case .unloaded = whisperStatus { whisperStatus = .loading }
             let instruction = CorrectionStore.apply(
@@ -465,13 +519,15 @@ final class AppState {
                 print("  (paste skipped: Accessibility not granted)")
                 pasteReady = false
             } else {
+                finishRewrite()
                 // The original selection is still highlighted in the target
                 // app, so this paste replaces it.
-                await paster.paste(rewritten)
+                await paster.paste(rewritten, into: target)
                 play("Pop")
             }
         } catch {
             print("  rewrite failed: \(error)")
+            Self.log.error("rewrite failed: \(error)")
         }
         finishRewrite()
     }
@@ -555,6 +611,7 @@ final class AppState {
         guard unloadWhisper || unloadCleaner else { return }
 
         print("(memory saver: unloading models after \(minutes) min idle)")
+        Self.log.notice("memory saver: unloading models after \(minutes) min idle — next dictation pays a reload")
         if unloadWhisper { whisperStatus = .unloaded }
         if unloadCleaner { cleanupStatus = .unloaded }
         Task {

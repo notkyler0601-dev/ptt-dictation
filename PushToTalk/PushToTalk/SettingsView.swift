@@ -239,8 +239,12 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        // The corrections and voice-command lists grow without bound, so the
+        // height must be capped: a grouped Form only scrolls when its frame
+        // is smaller than its content. maxHeight .infinity keeps the window
+        // user-resizable vertically.
         .frame(width: 540)
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(minHeight: 400, idealHeight: 620, maxHeight: .infinity)
         .onAppear { corrections = CorrectionStore.load() }
     }
 }

@@ -28,7 +28,13 @@ final class Paster {
         return AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
 
-    func paste(_ text: String) async {
+    /// `target` is the app that was frontmost when the user *started*
+    /// dictating. We re-focus it before pasting so a slow transcription
+    /// (whisper occasionally stalls for many seconds under GPU/memory
+    /// contention) can't land the paste in whatever window the user
+    /// wandered to in the meantime. nil keeps the old behaviour (paste at
+    /// the current focus).
+    func paste(_ text: String, into target: NSRunningApplication? = nil) async {
         let pasteboard = NSPasteboard.general
         // v1 preserves plain text only — images/rich content on the
         // clipboard are not restored. (Prototype parity.)
@@ -36,6 +42,7 @@ final class Paster {
 
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        await restoreFocusIfNeeded(to: target)
         pressCmdV()
 
         // Suspends (doesn't block the main thread) — and because the
@@ -47,6 +54,29 @@ final class Paster {
             pasteboard.clearContents()
             pasteboard.setString(saved, forType: .string)
         }
+    }
+
+    /// Bring `target` back to the front if focus has drifted since the user
+    /// started speaking. A no-op when they never left — the common, fast
+    /// case — so normal dictations pay nothing for this.
+    private func restoreFocusIfNeeded(to target: NSRunningApplication?) async {
+        guard let target, !target.isTerminated else { return }
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        if frontmost?.processIdentifier == target.processIdentifier { return }
+
+        // Two routes on purpose. macOS's cooperative activation can refuse a
+        // background agent like us, so NSRunningApplication.activate alone
+        // isn't reliable from here; setting kAXFrontmost via the Accessibility
+        // API (which we already hold permission for, to post the Cmd+V) forces
+        // the raise when activate() is declined. Belt and suspenders.
+        target.activate()
+        let axApp = AXUIElementCreateApplication(target.processIdentifier)
+        AXUIElementSetAttributeValue(axApp, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+
+        // Let the window server actually switch front before we synthesize
+        // keystrokes — otherwise Cmd+V can race ahead of the activation and
+        // still hit the old window. ~120 ms lands reliably without being felt.
+        try? await Task.sleep(for: .seconds(0.12))
     }
 
     /// Grabs the frontmost app's current selection by synthesizing Cmd+C

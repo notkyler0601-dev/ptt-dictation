@@ -1,4 +1,5 @@
 import Foundation
+import os
 import MLX
 @preconcurrency import MLXLLM
 @preconcurrency import MLXLMCommon
@@ -158,9 +159,13 @@ actor Cleaner {
         }
     }
 
+    private static let log = Logger(
+        subsystem: "Kyler-Zheng.PushToTalk", category: "cleanup")
+
     private static func loadContainer(
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> ModelContainer {
+        let started = Date()
         let hubConfig = ModelConfiguration(id: Self.modelID)
 
         // Fast path: the model is already on disk. An id-based config does
@@ -169,13 +174,19 @@ actor Cleaner {
         // reload. A directory-based config never touches the network.
         // modelDirectory() just computes where the hub cache for this id
         // lives; config.json is the marker that a download completed there.
-        let localDir = hubConfig.modelDirectory()
+        // Must probe with the factory's own defaultHubApi (~/Library/Caches)
+        // — a plain HubApi() roots in ~/Documents/huggingface, a directory
+        // the factory never writes to, so the probe always missed and every
+        // reload silently fell through to the network path.
+        let localDir = hubConfig.modelDirectory(hub: defaultHubApi)
         if FileManager.default.fileExists(
             atPath: localDir.appendingPathComponent("config.json").path) {
             do {
-                return try await LLMModelFactory.shared.loadContainer(
+                let container = try await LLMModelFactory.shared.loadContainer(
                     configuration: ModelConfiguration(directory: localDir),
                     progressHandler: { progress($0.fractionCompleted) })
+                log.notice("cleanup model loaded from local folder in \(Date().timeIntervalSince(started), format: .fixed(precision: 1))s")
+                return container
             } catch {
                 // Stale/partial cache — fall through to the hub load, which
                 // re-fetches whatever is missing.
@@ -183,8 +194,10 @@ actor Cleaner {
             }
         }
 
-        return try await LLMModelFactory.shared.loadContainer(
+        let container = try await LLMModelFactory.shared.loadContainer(
             configuration: hubConfig,
             progressHandler: { progress($0.fractionCompleted) })
+        log.notice("cleanup model loaded via hub path in \(Date().timeIntervalSince(started), format: .fixed(precision: 1))s")
+        return container
     }
 }
